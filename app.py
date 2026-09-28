@@ -5,9 +5,9 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="AI 時代尖端操盤系統 (技術+基本面+利多催化劑)", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AI 時代尖端操盤系統 (全指標高維量化版)", layout="wide", initial_sidebar_state="expanded")
 
-# --- 20 大尖端主流族群輪動觀察池 (涵蓋 85 檔指標飆股) ---
+# --- 20 大尖端主流族群輪動觀察池 (涵蓋 85 檔指標熱門飆股) ---
 SECTOR_MAP = {
     "CPO 矽光子 / 光通訊": {
         "聯鈞 (3450)": "3450.TW", "上詮 (3363)": "3363.TWO", "聯亞 (3081)": "3081.TWO",
@@ -96,35 +96,54 @@ for sec, stk_dict in SECTOR_MAP.items():
         ALL_STOCKS[name] = code
         STOCK_TO_SECTOR[name] = sec
 
-# --- 高階技術指標計算 ---
-def calculate_indicators(df):
+# --- 全套高維度可靠技術指標運算引擎 ---
+def calculate_all_indicators(df):
     df = df.copy()
+
+    # 1. 均線系統
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
     df['Vol_MA5'] = df['Volume'].rolling(5).mean()
 
-    # VCP 波動收斂
+    # 2. 布林通道與帶寬 (VCP 波動收斂核心)
     std20 = df['Close'].rolling(20).std()
     df['BB_Upper'] = df['MA20'] + (2 * std20)
     df['BB_Lower'] = df['MA20'] - (2 * std20)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / (df['MA20'] + 1e-9)
 
-    # ATR
+    # 3. ATR (真實波動幅度 - 風控與停損依據)
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(14).mean()
 
-    # OBV
+    # 4. OBV (能量潮 - 威科夫籌碼吸籌)
     obv_change = np.where(df['Close'] > df['Close'].shift(1), df['Volume'],
                  np.where(df['Close'] < df['Close'].shift(1), -df['Volume'], 0))
     df['OBV'] = pd.Series(obv_change, index=df.index).cumsum()
     df['OBV_MA10'] = df['OBV'].rolling(10).mean()
 
-    # KD
+    # 5. MFI (資金流量指標 - 量價合一動能指標，14日)
+    tp = (df['High'] + df['Low'] + df['Close']) / 3
+    rmf = tp * df['Volume']
+    pos_flow = pd.Series(np.where(tp > tp.shift(1), rmf, 0), index=df.index).rolling(14).sum()
+    neg_flow = pd.Series(np.where(tp < tp.shift(1), rmf, 0), index=df.index).rolling(14).sum()
+    mfi_ratio = pos_flow / (neg_flow + 1e-9)
+    df['MFI'] = 100 - (100 / (1 + mfi_ratio))
+
+    # 6. RSI (相對強弱指標，14日)
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # 7. KD (9, 3, 3)
     low_min = df['Low'].rolling(9).min()
     high_max = df['High'].rolling(9).max()
     rsv = ((df['Close'] - low_min) / (high_max - low_min + 1e-9)) * 100
@@ -139,15 +158,16 @@ def calculate_indicators(df):
     df['K'] = k_list
     df['D'] = d_list
 
-    # MACD
+    # 8. MACD (12, 26, 9)
     exp12 = df['Close'].ewm(span=12, adjust=False).mean()
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['DIF'] = exp12 - exp26
     df['MACD'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['DIF'] - df['MACD']
+
     return df
 
-# --- 大盤基準 ---
+# --- 大盤基準與總體環境 ---
 @st.cache_data(ttl=600)
 def get_benchmark_data():
     bm = yf.download("^TWII", period="6mo", progress=False)
@@ -172,45 +192,42 @@ if not benchmark_df.empty:
     else:
         bm_trend = "🟡 區間震盪環境 (指數空間有限，資金極度聚焦熱門題材股)"
 
-# --- 基本面與即時利多新聞抓取函式 ---
+# --- 基本面與催化劑新聞抓取 (嚴格 5% 權重) ---
 @st.cache_data(ttl=600)
 def get_fundamental_and_news(ticker):
     stock_obj = yf.Ticker(ticker)
     info = stock_obj.info or {}
     news = stock_obj.news or []
 
-    # 擷取關鍵基本面
-    rev_growth = info.get('revenueGrowth', None) # 營收年增率
-    earn_growth = info.get('earningsGrowth', None) # 獲利年增率
-    target_price = info.get('targetMeanPrice', None) # 法人平均目標價
-    forward_pe = info.get('forwardPE', None) # 前瞻本益比
-    gross_margin = info.get('grossMargins', None) # 毛利率
+    rev_growth = info.get('revenueGrowth', None)
+    earn_growth = info.get('earningsGrowth', None)
+    target_price = info.get('targetMeanPrice', None)
+    forward_pe = info.get('forwardPE', None)
 
     return {
         "rev_growth": rev_growth * 100 if rev_growth is not None else None,
         "earn_growth": earn_growth * 100 if earn_growth is not None else None,
         "target_price": target_price,
         "forward_pe": forward_pe,
-        "gross_margin": gross_margin * 100 if gross_margin is not None else None,
-        "news": news[:5] # 取最近 5 則最新消息
+        "news": news[:5]
     }
 
 # --- 頁籤系統 ---
 tab_daily, tab_rank, tab_detail = st.tabs([
-    "🎯 今日 AI 推薦做多標的 (技術+基本面+利多)", 
-    "🔥 20 大尖端族群動能總榜", 
-    "🔍 個股多維深入技術與基本面診斷"
+    "🎯 今日最佳現貨做多標的 (技術95% + 基本面5%)", 
+    "🔥 20 大族群熱度與全景評分榜", 
+    "🔍 個股多維深度技術診斷"
 ])
 
 # =========================================================
-# 分頁 1：今日推薦 (大數據精選 + 基本面體檢 + 利多新聞)
+# 分頁 1：今日推薦 (技術面 95% + 基本面 5% + 停損停利)
 # =========================================================
 with tab_daily:
     st.header("🎯 世紀飆股雷達：今日最佳現貨做多標的")
     st.info(f"當前大盤總體環境架構：**{bm_trend}**")
 
-    if st.button("🚀 啟動 20 大族群大數據＋基本面成長性深度掃描", type="primary"):
-        with st.spinner("正在進行平行計算：技術趨勢(25%) + RS相對強弱(20%) + 量價OBV(20%) + VCP型態(10%) + 基本面/法人空間(25%)..."):
+    if st.button("🚀 啟動 20 大主流族群大數據全指標掃描", type="primary"):
+        with st.spinner("正在進行五大技術模組(95%) + 基本面催化(5%) 平行運算..."):
             all_tickers = list(ALL_STOCKS.values())
             raw_data = yf.download(all_tickers, period="6mo", group_by='ticker', threads=True, progress=False)
 
@@ -230,20 +247,20 @@ with tab_daily:
                     if hasattr(df.columns, 'levels') and len(df.columns.levels) > 1:
                         df.columns = df.columns.get_level_values(0)
 
-                    df = calculate_indicators(df)
+                    df = calculate_all_indicators(df)
                     latest = df.iloc[-1]
                     prev = df.iloc[-2]
                     sec_name = STOCK_TO_SECTOR[name]
                     pct_change = (latest['Close'] - prev['Close']) / prev['Close'] * 100
 
-                    # 1. 趨勢與架構 (25%)
+                    # 1. 趨勢與架構 (權重 25 分)
                     score_trend = 0
                     if latest['Close'] > latest['MA20'] > latest['MA60']: score_trend += 12
                     if latest['MA20'] > df['MA20'].iloc[-5]: score_trend += 5
                     half_yr_high = df['High'].tail(120).max()
                     if (half_yr_high - latest['Close']) / half_yr_high <= 0.15: score_trend += 8
 
-                    # 2. 相對強弱 RS vs 大盤 (20%)
+                    # 2. 相對大盤強弱度 RS (權重 20 分)
                     stock_ret_20d = (latest['Close'] - df['Close'].iloc[-20]) / df['Close'].iloc[-20] * 100
                     rs_alpha = stock_ret_20d - bm_ret_20d
                     score_rs = 0
@@ -251,24 +268,31 @@ with tab_daily:
                     elif rs_alpha > 3.0: score_rs = 14
                     elif rs_alpha > 0: score_rs = 8
 
-                    # 3. 威科夫量價與吸籌 (20%)
+                    # 3. 成交量與資金流向 (權重 20 分 - 量比 + OBV + MFI)
                     vol_ratio = latest['Volume'] / (latest['Vol_MA5'] + 1e-9)
                     score_vol = 0
-                    if vol_ratio >= 1.4 and latest['Close'] > latest['Open']: score_vol += 12
-                    elif vol_ratio >= 1.1 and latest['Close'] > latest['Open']: score_vol += 7
-                    if latest['OBV'] > latest['OBV_MA10']: score_vol += 8
+                    if vol_ratio >= 1.4 and latest['Close'] > latest['Open']: score_vol += 8
+                    elif vol_ratio >= 1.1 and latest['Close'] > latest['Open']: score_vol += 4
+                    if latest['OBV'] > latest['OBV_MA10']: score_vol += 6
+                    # MFI 資金流多方吸籌區 (50 ~ 75)
+                    if 50 <= latest['MFI'] <= 75: score_vol += 6
+                    elif latest['MFI'] > 75: score_vol += 3
 
-                    # 4. VCP 波動收斂 (10%)
+                    # 4. 波動收縮與型態 VCP (權重 15 分)
                     score_vcp = 0
                     bw_min_recent = df['BB_Width'].tail(30).min()
-                    if latest['BB_Width'] <= bw_min_recent * 1.3: score_vcp += 6
+                    if latest['BB_Width'] <= bw_min_recent * 1.3: score_vcp += 10
                     recent_5_amp = (df['High'].tail(5).max() - df['Low'].tail(5).min()) / latest['Close'] * 100
-                    if recent_5_amp < 6.0: score_vcp += 4
+                    if recent_5_amp < 6.0: score_vcp += 5
 
-                    # 5. 時機動能 (5%)
+                    # 5. 擺盪指標時機共振 (權重 15 分 - KD + MACD + RSI)
                     score_mom = 0
-                    if 50 <= latest['K'] <= 80: score_mom += 3
-                    if latest['MACD_Hist'] > 0 and latest['MACD_Hist'] > prev['MACD_Hist']: score_mom += 2
+                    if 50 <= latest['K'] <= 80: score_mom += 4
+                    if prev['K'] < prev['D'] and latest['K'] >= latest['D']: score_mom += 3
+                    if latest['MACD_Hist'] > 0 and latest['MACD_Hist'] > prev['MACD_Hist']: score_mom += 4
+                    # RSI 強勢發動區間 (52 ~ 68)
+                    if 52 <= latest['RSI'] <= 68: score_mom += 4
+                    elif latest['RSI'] > 68: score_mom += 2
 
                     tech_total = score_trend + score_rs + score_vol + score_vcp + score_mom
 
@@ -279,6 +303,7 @@ with tab_daily:
                     stop_l = max(low_5d, entry_p - 1.3 * atr_v)
                     risk_pct = (entry_p - stop_l) / entry_p * 100
 
+                    # 追高懲罰
                     if risk_pct > 7.0:
                         tech_total -= 30
 
@@ -296,6 +321,8 @@ with tab_daily:
                         "pct": pct_change,
                         "rs_alpha": rs_alpha,
                         "vol_ratio": vol_ratio,
+                        "mfi": latest['MFI'],
+                        "rsi": latest['RSI'],
                         "stop_loss": stop_l,
                         "risk_pct": risk_pct,
                         "df": df
@@ -304,7 +331,7 @@ with tab_daily:
                     continue
 
             if results:
-                # 先對技術前 8 名做基本面加權深化
+                # 取技術分前 8 名做基本面 5% 權重整合
                 results.sort(key=lambda x: x['tech_score'], reverse=True)
                 top_candidates = results[:8]
 
@@ -312,42 +339,35 @@ with tab_daily:
                     f_data = get_fundamental_and_news(cand['code'])
                     cand['fundamental'] = f_data
 
-                    # 基本面評分 (20分)
+                    # 基本面 5% (最高 5 分)
                     score_fund = 0
                     rev_g = f_data['rev_growth']
                     tp = f_data['target_price']
-                    
-                    # 營收爆發性
-                    if rev_g is not None:
-                        if rev_g >= 30.0: score_fund += 10 # 營收年增 30% 以上爆發
-                        elif rev_g >= 15.0: score_fund += 6
-                        elif rev_g > 0: score_fund += 3
 
-                    # 法人目標價空間
+                    if rev_g is not None and rev_g > 15.0: score_fund += 3
+                    elif rev_g is not None and rev_g > 0: score_fund += 1.5
+
                     if tp is not None and tp > cand['close']:
                         upside = (tp - cand['close']) / cand['close'] * 100
                         cand['upside'] = upside
-                        if upside >= 25.0: score_fund += 10 # 距離目標價還有 25%+ 空間
-                        elif upside >= 12.0: score_fund += 6
-                        elif upside > 0: score_fund += 3
+                        if upside >= 20.0: score_fund += 2
+                        elif upside > 0: score_fund += 1
                     else:
                         cand['upside'] = 0.0
 
                     cand['score_fund'] = score_fund
                     cand['total_score'] = cand['tech_score'] + score_fund
 
-                # 選出融合技術與基本面的總冠軍
                 top_candidates.sort(key=lambda x: x['total_score'], reverse=True)
                 top = top_candidates[0]
 
-                # 計算 1.5R 與 2.5R 盈虧比目標
                 risk_amt = top['close'] - top['stop_loss']
                 tp_1 = top['close'] + 1.5 * risk_amt
                 tp_2 = top['close'] + 2.5 * risk_amt
 
-                st.success(f"🏆 【今日雙維度（技術＋基本面）綜合冠軍】：**{top['name']}** ｜ 所屬族群：**【{top['sector']}】**")
+                st.success(f"🏆 【今日做多首選標的】：**{top['name']}** ｜ 所屬族群：**【{top['sector']}】**")
                 
-                # 數值指標卡
+                # 關鍵數值指標卡
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("🎯 建議現價進場點", f"{top['close']:.2f} 元", f"今日漲跌 {top['pct']:+.2f}%")
                 col2.metric("🛡️ 嚴格防守停損點", f"{top['stop_loss']:.2f} 元", f"-{top['risk_pct']:.2f}%", delta_color="inverse")
@@ -356,38 +376,43 @@ with tab_daily:
 
                 st.markdown("---")
 
-                # 基本面體檢與法人共識
-                st.subheader("📊 核心基本面爆發力與法人預期")
+                # 大數據六維思考拆解
+                st.subheader("🧠 系統為何選中它？大數據思考維度拆解 (技術95% + 基本面5%)")
+                m1, m2, m3, m4, m5, m6 = st.columns(6)
+                m1.metric("1. 趨勢結構 (25%)", f"{top['score_trend']} / 25 分")
+                m2.metric("2. 相對大盤 RS (20%)", f"{top['score_rs']} / 20 分", f"Alpha {top['rs_alpha']:+.2f}%")
+                m3.metric("3. 量能與MFI (20%)", f"{top['score_vol']} / 20 分", f"MFI: {top['mfi']:.1f}")
+                m4.metric("4. 波動VCP (15%)", f"{top['score_vcp']} / 15 分")
+                m5.metric("5. 指標共振 (15%)", f"{top['score_mom']} / 15 分", f"RSI: {top['rsi']:.1f}")
+                m6.metric("6. 基本面催化 (5%)", f"{top['score_fund']:.1f} / 5 分")
+
+                st.info(f"""
+                **📌 操盤手作戰與風控指引：**
+                * **技術面共振核心**：
+                    * 均線多頭排列且站穩月季線之上，近 20 日相對加權指數跑出 **{top['rs_alpha']:+.2f}%** 超額收益。
+                    * 成交量放大，**MFI 資金流量指標** 達 **{top['mfi']:.1f}**，顯示主力大單資金淨流入。
+                    * **RSI (14)** 來到 **{top['rsi']:.1f}** 強勢攻堅區，且布林帶寬完成壓縮突破。
+                * **進出場紀律**：
+                    * 現價 **{top['close']:.2f} 元** 附近分批介入。
+                    * 若收盤價跌破 **{top['stop_loss']:.2f} 元**（單筆虧損控制在 **{top['risk_pct']:.2f}%** 內），立即嚴格離場，絕不凹單。
+                    * 抵達第一目標 **{tp_1:.2f} 元** 先行獲利了結 1/2，剩餘倉位停損點移至買進成本保本，博取波段目標 **{tp_2:.2f} 元**。
+                """)
+
+                # 基本面體檢與利多新聞
+                st.markdown("---")
+                st.subheader("📰 催化劑與基本面體檢 (5% 權重確認)")
                 f = top['fundamental']
-                fb1, fb2, fb3, fb4 = st.columns(4)
-                
-                rev_display = f"{f['rev_growth']:+.1f}%" if f['rev_growth'] is not None else "資料更新中"
-                earn_display = f"{f['earn_growth']:+.1f}%" if f['earn_growth'] is not None else "資料更新中"
-                tp_display = f"{f['target_price']:.1f} 元" if f['target_price'] is not None else "尚無法人目標"
-                upside_display = f"{top.get('upside', 0):+.1f}%" if f['target_price'] is not None else "--"
-                pe_display = f"{f['forward_pe']:.1f} 倍" if f['forward_pe'] is not None else "N/A"
+                fc1, fc2, fc3 = st.columns(3)
+                fc1.write(f"**營收年增率 (YoY)**：{f['rev_growth']:+.1f}%" if f['rev_growth'] else "**營收年增率**：資料更新中")
+                fc2.write(f"**法人目標價**：{f['target_price']:.1f} 元 (空間 {top.get('upside',0):+.1f}%)" if f['target_price'] else "**法人目標價**：暫無公開報告")
+                fc3.write(f"**前瞻本益比**：{f['forward_pe']:.1f} 倍" if f['forward_pe'] else "**前瞻本益比**：N/A")
 
-                fb1.metric("最新營收年增率 (YoY)", rev_display)
-                fb2.metric("最新獲利年增率 (YoY)", earn_display)
-                fb3.metric("法人平均目標價", tp_display, f"潛在空間 {upside_display}")
-                fb4.metric("前瞻本益比 (Forward PE)", pe_display)
-
-                st.markdown("---")
-
-                # 十倍催化劑：即時新聞與合作題材
-                st.subheader("📰 十倍行情催化劑：即時利多新聞與題材動向")
                 if f['news']:
-                    for n in f['news']:
-                        title = n.get('title', '即時訊息')
-                        publisher = n.get('publisher', '財經媒體')
-                        link = n.get('link', '#')
-                        st.markdown(f"* 🔗 **[{title}]({link})** — *{publisher}*")
-                else:
-                    st.write("目前尚無最新重大公開公告，主力處於低調沿均線吃貨期。")
+                    st.write("**🔥 最新市場利多動態：**")
+                    for nw in f['news']:
+                        st.markdown(f"* 🔗 [{nw.get('title', '新聞')}]({nw.get('link', '#')}) — *{nw.get('publisher', '')}*")
 
-                st.markdown("---")
-
-                # 視覺化圖表
+                # 繪製點位 K 線圖
                 fig_top = go.Figure(data=[go.Candlestick(
                     x=top['df'].index[-45:],
                     open=top['df']['Open'][-45:],
@@ -409,7 +434,7 @@ with tab_daily:
             else:
                 st.warning("市場正處於劇烈下修期，無符合標準之標的，請嚴格空手觀望。")
     else:
-        st.write("👉 點擊上方按鈕，系統將自動啟動技術面、營收成長性與利多消息之綜合演算。")
+        st.write("👉 點擊上方按鈕，系統將自動啟動 20 大族群大數據全指標演算。")
 
 # =========================================================
 # 分頁 2：族群熱度與全體評分榜
@@ -427,16 +452,18 @@ with tab_rank:
             table_rows.append({
                 "標的": r['name'],
                 "所屬族群": r['sector'],
-                "技術分": r['tech_score'],
+                "技術分(95)": r['tech_score'],
                 "現價": f"{r['close']:.2f}",
                 "今日漲跌%": f"{r['pct']:+.2f}%",
                 "相對大盤RS%": f"{r['rs_alpha']:+.2f}%",
-                "量比 (Vol/5MA)": f"{r['vol_ratio']:.2f}x",
+                "量比": f"{r['vol_ratio']:.2f}x",
+                "MFI資金流": f"{r['mfi']:.1f}",
+                "RSI(14)": f"{r['rsi']:.1f}",
                 "趨勢(25)": r['score_trend'],
                 "RS(20)": r['score_rs'],
                 "量能(20)": r['score_vol'],
-                "VCP(10)": r['score_vcp'],
-                "時機(5)": r['score_mom'],
+                "VCP(15)": r['score_vcp'],
+                "時機(15)": r['score_mom'],
                 "建議停損%": f"-{r['risk_pct']:.2f}%"
             })
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
@@ -444,25 +471,30 @@ with tab_rank:
         st.info("請先至第一分頁點擊『啟動大數據掃描』，數據將自動在此生成。")
 
 # =========================================================
-# 分頁 3：個股多維深入技術與基本面診斷
+# 分頁 3：個股多維深度技術診斷 (全套靠譜技術指標副圖)
 # =========================================================
 with tab_detail:
-    st.sidebar.title("📈 個股深度分析控制台")
-    selected_sec = st.sidebar.selectbox("快速按族群挑選", list(SECTOR_MAP.keys()))
-    selected_stock = st.sidebar.selectbox("選擇要分析的標的", list(SECTOR_MAP[selected_sec].keys()))
+    st.sidebar.title("📈 個股技術分析控制台")
+    selected_sec = st.sidebar.selectbox("快速按族群挑選", list(SECTOR_MAP.keys()), key="d_sec")
+    selected_stock = st.sidebar.selectbox("選擇要分析的標的", list(SECTOR_MAP[selected_sec].keys()), key="d_stk")
     stock_code = SECTOR_MAP[selected_sec][selected_stock]
 
     period_map = {"1 個月": "1mo", "3 個月": "3mo", "6 個月": "6mo", "1 年": "1y", "2 年": "2y"}
-    selected_period = st.sidebar.selectbox("分析週期", list(period_map.keys()), index=2)
+    selected_period = st.sidebar.selectbox("分析週期", list(period_map.keys()), index=2, key="d_per")
     show_ma = st.sidebar.multiselect("顯示均線", ["MA5", "MA10", "MA20", "MA60"], default=["MA5", "MA20", "MA60"])
-    indicator_choice = st.sidebar.radio("副圖技術指標", ["KD 指標 (9,3,3)", "MACD (12,26,9)", "布林帶寬 (VCP壓縮)", "全指標展示"])
+    indicator_choice = st.sidebar.radio("副圖技術指標配置", [
+        "精選三大動能 (KD + MACD + RSI)",
+        "主力資金流向 (成交量 + OBV + MFI)",
+        "波動壓縮與型態 (布林帶寬 BandWidth)",
+        "🚀 全副圖完整展示 (全部指標展開)"
+    ])
 
     df_d = yf.download(stock_code, period=period_map[selected_period], progress=False)
     if hasattr(df_d.columns, 'levels') and len(df_d.columns.levels) > 1:
         df_d.columns = df_d.columns.get_level_values(0)
 
     if not df_d.empty:
-        df_d = calculate_indicators(df_d)
+        df_d = calculate_all_indicators(df_d)
         latest_d = df_d.iloc[-1]
         prev_d = df_d.iloc[-2] if len(df_d) > 1 else latest_d
         p_diff = latest_d['Close'] - prev_d['Close']
@@ -472,22 +504,25 @@ with tab_detail:
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("最新收盤價", f"{latest_d['Close']:.2f} 元", f"{p_diff:+.2f} ({pct_diff:+.2f}%)")
         c2.metric("單日最高 / 最低", f"{latest_d['High']:.2f} / {latest_d['Low']:.2f}")
-        c3.metric("5日均量 (Vol 5MA)", f"{int(latest_d['Vol_MA5']):,} 股")
-        c4.metric("14日真實波幅 (ATR)", f"{latest_d['ATR']:.2f} 元")
-        c5.metric("布林帶寬 (BandWidth)", f"{latest_d['BB_Width']:.3f}")
+        c3.metric("MFI 資金流量", f"{latest_d['MFI']:.1f}")
+        c4.metric("RSI (14)", f"{latest_d['RSI']:.1f}")
+        c5.metric("14日真實波幅 (ATR)", f"{latest_d['ATR']:.2f} 元")
 
-        # 子圖架構
-        if indicator_choice == "全指標展示":
-            rows, r_heights = 5, [0.44, 0.14, 0.14, 0.14, 0.14]
-            sub_titles = ("K線與均線走勢", "成交量 (Volume)", "KD 指標", "MACD 指標", "布林帶寬 (波動擠壓)")
-        elif indicator_choice == "布林帶寬 (VCP壓縮)":
-            rows, r_heights = 3, [0.55, 0.22, 0.23]
-            sub_titles = ("K線走勢", "成交量", "布林帶寬 (BandWidth)")
+        # 子圖架構建立
+        if indicator_choice == "🚀 全副圖完整展示 (全部指標展開)":
+            rows, r_heights = 6, [0.38, 0.12, 0.12, 0.13, 0.12, 0.13]
+            sub_titles = ("K線與均線走勢", "成交量 (Volume)", "KD 指標 (9,3,3)", "MACD (12,26,9)", "RSI (14)", "MFI 資金流量 (14)")
+        elif indicator_choice == "精選三大動能 (KD + MACD + RSI)":
+            rows, r_heights = 4, [0.46, 0.18, 0.18, 0.18]
+            sub_titles = ("K線與均線走勢", "KD 指標", "MACD 指標", "RSI (14)")
+        elif indicator_choice == "主力資金流向 (成交量 + OBV + MFI)":
+            rows, r_heights = 4, [0.46, 0.18, 0.18, 0.18]
+            sub_titles = ("K線與均線走勢", "成交量 (Volume)", "OBV 能量潮", "MFI 資金流量")
         else:
             rows, r_heights = 3, [0.55, 0.22, 0.23]
-            sub_titles = ("K線走勢", "成交量", indicator_choice)
+            sub_titles = ("K線與均線走勢", "成交量", "布林帶寬 (BandWidth)")
 
-        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=r_heights, subplot_titles=sub_titles)
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.025, row_heights=r_heights, subplot_titles=sub_titles)
 
         # 1. K 線圖 (台股紅漲綠跌)
         fig.add_trace(go.Candlestick(
@@ -499,43 +534,59 @@ with tab_detail:
         for ma in show_ma:
             fig.add_trace(go.Scatter(x=df_d.index, y=df_d[ma], mode='lines', name=ma, line=dict(color=ma_colors[ma], width=1.5)), row=1, col=1)
 
-        # 2. 成交量
-        vol_c = ['#eb4034' if c >= o else '#0da651' for c, o in zip(df_d['Close'], df_d['Open'])]
-        fig.add_trace(go.Bar(x=df_d.index, y=df_d['Volume'], marker_color=vol_c, name="成交量"), row=2, col=1)
-
-        # 3. 副圖
-        cur = 3
-        if indicator_choice in ["KD 指標 (9,3,3)", "全指標展示"]:
-            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['K'], line=dict(color='#e74c3c', width=1.5), name="K (9)"), row=cur, col=1)
-            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['D'], line=dict(color='#3498db', width=1.5), name="D (9)"), row=cur, col=1)
-            fig.add_hline(y=80, line_dash="dash", line_color="gray", row=cur, col=1)
-            fig.add_hline(y=20, line_dash="dash", line_color="gray", row=cur, col=1)
-            cur += 1
-
-        if indicator_choice in ["MACD (12,26,9)", "全指標展示"]:
-            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['DIF'], line=dict(color='#2980b9', width=1.3), name="DIF"), row=cur, col=1)
-            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['MACD'], line=dict(color='#e67e22', width=1.3), name="MACD"), row=cur, col=1)
+        # 根據選擇動態填充分圖
+        if indicator_choice == "🚀 全副圖完整展示 (全部指標展開)":
+            # 2. Volume
+            vol_c = ['#eb4034' if c >= o else '#0da651' for c, o in zip(df_d['Close'], df_d['Open'])]
+            fig.add_trace(go.Bar(x=df_d.index, y=df_d['Volume'], marker_color=vol_c, name="成交量"), row=2, col=1)
+            # 3. KD
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['K'], line=dict(color='#e74c3c', width=1.5), name="K"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['D'], line=dict(color='#3498db', width=1.5), name="D"), row=3, col=1)
+            fig.add_hline(y=80, line_dash="dash", line_color="gray", row=3, col=1)
+            fig.add_hline(y=20, line_dash="dash", line_color="gray", row=3, col=1)
+            # 4. MACD
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['DIF'], line=dict(color='#2980b9', width=1.3), name="DIF"), row=4, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['MACD'], line=dict(color='#e67e22', width=1.3), name="MACD"), row=4, col=1)
             hist_c = ['#eb4034' if v >= 0 else '#0da651' for v in df_d['MACD_Hist']]
-            fig.add_trace(go.Bar(x=df_d.index, y=df_d['MACD_Hist'], marker_color=hist_c, name="MACD柱"), row=cur, col=1)
-            cur += 1
+            fig.add_trace(go.Bar(x=df_d.index, y=df_d['MACD_Hist'], marker_color=hist_c, name="MACD柱"), row=4, col=1)
+            # 5. RSI
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['RSI'], line=dict(color='#9b59b6', width=1.4), name="RSI(14)"), row=5, col=1)
+            fig.add_hline(y=70, line_dash="dash", line_color="gray", row=5, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="gray", row=5, col=1)
+            # 6. MFI
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['MFI'], line=dict(color='#1abc9c', width=1.4), name="MFI(14)"), row=6, col=1)
+            fig.add_hline(y=80, line_dash="dash", line_color="gray", row=6, col=1)
+            fig.add_hline(y=20, line_dash="dash", line_color="gray", row=6, col=1)
 
-        if indicator_choice in ["布林帶寬 (VCP壓縮)", "全指標展示"]:
-            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['BB_Width'], line=dict(color='#8e44ad', width=1.4), name="BandWidth"), row=cur, col=1)
+        elif indicator_choice == "精選三大動能 (KD + MACD + RSI)":
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['K'], line=dict(color='#e74c3c', width=1.5), name="K"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['D'], line=dict(color='#3498db', width=1.5), name="D"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['DIF'], line=dict(color='#2980b9', width=1.3), name="DIF"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['MACD'], line=dict(color='#e67e22', width=1.3), name="MACD"), row=3, col=1)
+            hist_c = ['#eb4034' if v >= 0 else '#0da651' for v in df_d['MACD_Hist']]
+            fig.add_trace(go.Bar(x=df_d.index, y=df_d['MACD_Hist'], marker_color=hist_c, name="MACD柱"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['RSI'], line=dict(color='#9b59b6', width=1.4), name="RSI"), row=4, col=1)
 
-        fig.update_layout(height=850, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=30, b=20), hovermode="x unified")
+        elif indicator_choice == "主力資金流向 (成交量 + OBV + MFI)":
+            vol_c = ['#eb4034' if c >= o else '#0da651' for c, o in zip(df_d['Close'], df_d['Open'])]
+            fig.add_trace(go.Bar(x=df_d.index, y=df_d['Volume'], marker_color=vol_c, name="成交量"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['OBV'], line=dict(color='#e67e22', width=1.4), name="OBV"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['OBV_MA10'], line=dict(color='gray', width=1.0), name="OBV_MA10"), row=3, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['MFI'], line=dict(color='#1abc9c', width=1.4), name="MFI"), row=4, col=1)
+
+        else:
+            vol_c = ['#eb4034' if c >= o else '#0da651' for c, o in zip(df_d['Close'], df_d['Open'])]
+            fig.add_trace(go.Bar(x=df_d.index, y=df_d['Volume'], marker_color=vol_c, name="成交量"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=df_d.index, y=df_d['BB_Width'], line=dict(color='#8e44ad', width=1.4), name="BandWidth"), row=3, col=1)
+
+        fig.update_layout(height=950, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=30, b=20), hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 深入基本面與新聞折疊區
-        with st.expander("🏢 該標的深入基本面體檢與最新即時新聞"):
-            f_detail = get_fundamental_and_news(stock_code)
-            dc1, dc2, dc3 = st.columns(3)
-            dc1.write(f"**營收年增率 (YoY)**：{f_detail['rev_growth']:+.1f}%" if f_detail['rev_growth'] else "**營收年增率**：N/A")
-            dc2.write(f"**法人目標價**：{f_detail['target_price']:.1f} 元" if f_detail['target_price'] else "**法人目標價**：尚無公開報告")
-            dc3.write(f"**前瞻本益比**：{f_detail['forward_pe']:.1f} 倍" if f_detail['forward_pe'] else "**前瞻本益比**：N/A")
-            
-            st.markdown("#### 最新新聞與公告")
-            if f_detail['news']:
-                for nw in f_detail['news']:
-                    st.markdown(f"* 🔗 [{nw.get('title', '新聞')}]({nw.get('link', '#')}) — *{nw.get('publisher', '')}*")
-            else:
-                st.write("查無近期相關新聞。")
+        with st.expander("📥 檢視與匯出個股數據 (CSV)"):
+            st.dataframe(df_d.tail(30).sort_index(ascending=False))
+            st.download_button(
+                label="下載完整歷史資料 CSV",
+                data=df_d.to_csv().encode('utf-8-sig'),
+                file_name=f"{stock_code}_history.csv",
+                mime="text/csv"
+            )

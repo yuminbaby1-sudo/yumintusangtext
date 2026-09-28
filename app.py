@@ -5,49 +5,87 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="AI 族群動能與量化操盤系統", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AI 時代尖端族群操盤與量化分析系統", layout="wide", initial_sidebar_state="expanded")
 
-# --- 時代尖端主流族群分類池 (近 50 檔關鍵人氣指標標的) ---
+# --- 20 大尖端主流族群輪動觀察池 (涵蓋 85 檔指標熱門飆股) ---
 SECTOR_MAP = {
-    "PCB / 載板 / CCL": {
-        "台光電 (2383)": "2383.TW", "欣興 (3037)": "3037.TW", 
-        "金像電 (2368)": "2368.TW", "台燿 (6274)": "6274.TW", "景碩 (3189)": "3189.TW"
-    },
-    "記憶體 / 模組": {
-        "南亞科 (2408)": "2408.TW", "華邦電 (2344)": "2344.TW", 
-        "群聯 (8299)": "8299.TWO", "威剛 (3260)": "3260.TWO", "十銓 (4967)": "4967.TW"
-    },
     "CPO 矽光子 / 光通訊": {
-        "聯鈞 (3450)": "3450.TW", "上詮 (3363)": "3363.TWO", 
-        "聯亞 (3081)": "3081.TWO", "華星光 (4979)": "4979.TWO", "光聖 (6442)": "6442.TW"
+        "聯鈞 (3450)": "3450.TW", "上詮 (3363)": "3363.TWO", "聯亞 (3081)": "3081.TWO",
+        "華星光 (4979)": "4979.TWO", "光聖 (6442)": "6442.TW", "眾達-KY (4977)": "4977.TW"
+    },
+    "CoWoS 先進封裝 / 設備": {
+        "辛耘 (3583)": "3583.TW", "弘塑 (3131)": "3131.TWO", "萬潤 (6187)": "6187.TWO",
+        "均豪 (5443)": "5443.TWO", "志聖 (2467)": "2467.TW"
     },
     "散熱模組 (水冷/液冷)": {
-        "奇鋐 (3017)": "3017.TW", "雙鴻 (3324)": "3324.TW", 
-        "高力 (8996)": "8996.TW", "健策 (3653)": "3653.TW"
+        "奇鋐 (3017)": "3017.TW", "雙鴻 (3324)": "3324.TW", "高力 (8996)": "8996.TW",
+        "健策 (3653)": "3653.TW", "尼得科超眾 (6230)": "6230.TW"
     },
     "AI 伺服器 & 組裝": {
-        "廣達 (2382)": "2382.TW", "緯創 (3231)": "3231.TW", 
-        "技嘉 (2376)": "2376.TW", "緯穎 (6669)": "6669.TW", "英業達 (2356)": "2356.TW"
+        "廣達 (2382)": "2382.TW", "緯創 (3231)": "3231.TW", "技嘉 (2376)": "2376.TW",
+        "緯穎 (6669)": "6669.TW", "英業達 (2356)": "2356.TW", "神達 (3706)": "3706.TW"
     },
-    "重電 / 綠能電網": {
-        "華城 (1519)": "1519.TW", "士電 (1503)": "1503.TW", 
-        "中興電 (1513)": "1513.TW", "亞力 (1514)": "1514.TW"
+    "PCB / 載板 / CCL": {
+        "台光電 (2383)": "2383.TW", "欣興 (3037)": "3037.TW", "金像電 (2368)": "2368.TW",
+        "台燿 (6274)": "6274.TW", "景碩 (3189)": "3189.TW", "南電 (8046)": "8046.TW"
+    },
+    "記憶體 / 模組 / 顆粒": {
+        "南亞科 (2408)": "2408.TW", "華邦電 (2344)": "2344.TW", "群聯 (8299)": "8299.TWO",
+        "威剛 (3260)": "3260.TWO", "十銓 (4967)": "4967.TW", "晶豪科 (3006)": "3006.TW"
     },
     "機器人 / 自動化": {
-        "所羅門 (2359)": "2359.TW", "和碩 (4938)": "4938.TW", 
-        "昆盈 (2365)": "2365.TW", "廣明 (6188)": "6188.TWO"
+        "所羅門 (2359)": "2359.TW", "昆盈 (2365)": "2365.TW", "廣明 (6188)": "6188.TWO",
+        "和碩 (4938)": "4938.TW", "羅昇 (8374)": "8374.TW", "穎漢 (4562)": "4562.TW"
     },
-    "CoWoS 設備 / 先進封裝": {
-        "辛耘 (3583)": "3583.TW", "弘塑 (3131)": "3131.TWO", 
-        "萬潤 (6187)": "6187.TWO", "均豪 (5443)": "5443.TWO"
+    "ASIC / 矽智財 (IP)": {
+        "世芯-KY (3661)": "3661.TW", "創意 (3443)": "3443.TW", "智原 (3035)": "3035.TW",
+        "力旺 (3529)": "3529.TWO", "M31 (6643)": "6643.TWO"
     },
-    "ASIC / 矽智財 / IC設計": {
-        "世芯-KY (3661)": "3661.TW", "創意 (3443)": "3443.TW", 
-        "智原 (3035)": "3035.TW", "聯發科 (2454)": "2454.TW"
+    "IC 設計 / 主流晶片": {
+        "聯發科 (2454)": "2454.TW", "聯詠 (3034)": "3034.TW", "瑞昱 (2379)": "2379.TW",
+        "祥碩 (5269)": "5269.TW", "信驊 (5274)": "5274.TWO"
     },
-    "核心權值 & 航運指標": {
-        "台積電 (2330)": "2330.TW", "鴻海 (2317)": "2317.TW", 
-        "台達電 (2308)": "2308.TW", "長榮 (2603)": "2603.TW", "陽明 (2609)": "2609.TW"
+    "半導體代工與封測": {
+        "台積電 (2330)": "2330.TW", "聯電 (2303)": "2303.TW", "日月光投控 (3711)": "3711.TW",
+        "京元電子 (2449)": "2449.TW"
+    },
+    "重電 / 綠能電網": {
+        "華城 (1519)": "1519.TW", "士電 (1503)": "1503.TW", "中興電 (1513)": "1513.TW",
+        "亞力 (1514)": "1514.TW", "大同 (2371)": "2371.TW"
+    },
+    "軍工防衛 / 無人機": {
+        "雷虎 (8033)": "8033.TW", "漢翔 (2634)": "2634.TW", "駐龍 (4572)": "4572.TW",
+        "亞航 (2630)": "2630.TW", "寶一 (8222)": "8222.TW"
+    },
+    "車用電子 / 電動車": {
+        "貿聯-KY (3665)": "3665.TW", "台達電 (2308)": "2308.TW", "定穎投控 (3715)": "3715.TW",
+        "胡連 (6279)": "6279.TW"
+    },
+    "光學鏡頭 / 機器視覺": {
+        "大立光 (3008)": "3008.TW", "玉晶光 (3406)": "3406.TW", "先進光 (3362)": "3362.TWO",
+        "佳凌 (4976)": "4976.TW"
+    },
+    "半導體特用化學品": {
+        "中華化 (1727)": "1727.TW", "三晃 (1721)": "1721.TW", "勝一 (1773)": "1773.TW",
+        "長興 (1717)": "1717.TW"
+    },
+    "航運 / 貨櫃與散裝": {
+        "長榮 (2603)": "2603.TW", "陽明 (2609)": "2609.TW", "萬海 (2615)": "2615.TW",
+        "裕民 (2606)": "2606.TW", "新興 (2605)": "2605.TW"
+    },
+    "生技醫療 / CDMO": {
+        "保瑞 (6472)": "6472.TW", "美時 (1795)": "1795.TW", "藥華藥 (6446)": "6446.TWO",
+        "晶碩 (6491)": "6491.TW"
+    },
+    "鋼鐵與原物料": {
+        "中鋼 (2002)": "2002.TW", "大成鋼 (2027)": "2027.TW", "中鴻 (2014)": "2014.TW"
+    },
+    "金融內資主力": {
+        "富邦金 (2881)": "2881.TW", "國泰金 (2882)": "2882.TW", "中信金 (2891)": "2891.TW",
+        "元大金 (2885)": "2885.TW"
+    },
+    "核心權值指標": {
+        "鴻海 (2317)": "2317.TW", "元大台灣50 (0050)": "0050.TW"
     }
 }
 
@@ -58,7 +96,7 @@ for sec, stk_dict in SECTOR_MAP.items():
         ALL_STOCKS[name] = code
         STOCK_TO_SECTOR[name] = sec
 
-# --- 高階技術指標計算函式 ---
+# --- 高階技術指標計算 ---
 def calculate_indicators(df):
     df = df.copy()
     # 均線
@@ -111,7 +149,7 @@ def calculate_indicators(df):
 
     return df
 
-# --- 大盤基準指數與環境濾網 ---
+# --- 大盤基準環境 ---
 @st.cache_data(ttl=600)
 def get_benchmark_data():
     bm = yf.download("^TWII", period="6mo", progress=False)
@@ -130,30 +168,29 @@ if not benchmark_df.empty:
     bm_ma20 = benchmark_df['Close'].rolling(20).mean().iloc[-1]
     bm_ma60 = benchmark_df['Close'].rolling(60).mean().iloc[-1]
     if bm_c > bm_ma20 > bm_ma60:
-        bm_trend = "🟢 多頭主升環境 (族群飆股順風推進，勝率最高)"
+        bm_trend = "🟢 多頭主升環境 (族群輪動強勁，做多順勢推升勝率高)"
     elif bm_c < bm_ma20 and bm_c < bm_ma60:
-        bm_trend = "🔴 空頭防守環境 (大盤下彎，嚴格控制部位或多觀望)"
+        bm_trend = "🔴 空頭防守環境 (大盤下彎，嚴格控制持倉部位)"
     else:
-        bm_trend = "🟡 震盪整理環境 (指數平淡，資金專攻強勢題材族群)"
+        bm_trend = "🟡 區間震盪環境 (指數空間有限，資金極度聚焦熱門題材股)"
 
-# --- 頁籤切換 ---
+# --- 頁籤系統 ---
 tab_daily, tab_rank, tab_detail = st.tabs([
-    "🎯 今日最佳現貨做多標的", 
-    "🔥 族群熱度與全體評分榜", 
-    "🔍 個股多維深入技術診斷"
+    "🎯 今日 AI 推薦做多標的", 
+    "🔥 20 大尖端族群動能總榜", 
+    "🔍 個股多維深度技術診斷"
 ])
 
 # =========================================================
-# 分頁 1：今日推薦 (大數據精選＋停損停利)
+# 分頁 1：今日精選推薦 (大數據思考拆解 + 停損停利)
 # =========================================================
 with tab_daily:
-    st.header("🎯 尖端族群量化掃描：今日精選現貨做多標的")
-    st.info(f"當前大盤架構：**{bm_trend}**")
+    st.header("🎯 尖端族群量化操盤：今日最佳現貨做多標的")
+    st.info(f"當前大盤總體環境架構：**{bm_trend}**")
 
-    if st.button("🚀 啟動 10 大主流族群大數據動能掃描", type="primary"):
-        with st.spinner("正在對 PCB、記憶體、CPO、散熱、AI、重電等指標股進行五維加權計算..."):
+    if st.button("🚀 啟動 20 大主流族群（85 檔指標飆股）大數據掃描", type="primary"):
+        with st.spinner("正在進行平行運算：趨勢(30%) + 相對大盤RS(25%) + 威科夫量價(20%) + VCP(15%) + 動能(10%)..."):
             all_tickers = list(ALL_STOCKS.values())
-            # 批次平行抓取所有標的
             raw_data = yf.download(all_tickers, period="6mo", group_by='ticker', threads=True, progress=False)
 
             bm_ret_20d = 0.0
@@ -162,6 +199,7 @@ with tab_daily:
 
             results = []
             sector_scores = {sec: [] for sec in SECTOR_MAP.keys()}
+            sector_pcts = {sec: [] for sec in SECTOR_MAP.keys()}
 
             for name, code in ALL_STOCKS.items():
                 try:
@@ -174,17 +212,15 @@ with tab_daily:
                     df = calculate_indicators(df)
                     latest = df.iloc[-1]
                     prev = df.iloc[-2]
-                    sector_name = STOCK_TO_SECTOR[name]
+                    sec_name = STOCK_TO_SECTOR[name]
+                    pct_change = (latest['Close'] - prev['Close']) / prev['Close'] * 100
 
                     # 1. 趨勢與架構 (30%)
                     score_trend = 0
-                    if latest['Close'] > latest['MA20'] > latest['MA60']:
-                        score_trend += 15
-                    if latest['MA20'] > df['MA20'].iloc[-5]:
-                        score_trend += 5
+                    if latest['Close'] > latest['MA20'] > latest['MA60']: score_trend += 15
+                    if latest['MA20'] > df['MA20'].iloc[-5]: score_trend += 5
                     half_yr_high = df['High'].tail(120).max()
-                    if (half_yr_high - latest['Close']) / half_yr_high <= 0.15:
-                        score_trend += 10
+                    if (half_yr_high - latest['Close']) / half_yr_high <= 0.15: score_trend += 10
 
                     # 2. 相對強弱 RS vs 大盤 (25%)
                     stock_ret_20d = (latest['Close'] - df['Close'].iloc[-20]) / df['Close'].iloc[-20] * 100
@@ -201,7 +237,7 @@ with tab_daily:
                     elif vol_ratio >= 1.1 and latest['Close'] > latest['Open']: score_vol += 7
                     if latest['OBV'] > latest['OBV_MA10']: score_vol += 8
 
-                    # 4. VCP 波動收斂與布林擠壓 (15%)
+                    # 4. VCP 波動收縮與布林擠壓 (15%)
                     score_vcp = 0
                     bw_min_recent = df['BB_Width'].tail(30).min()
                     if latest['BB_Width'] <= bw_min_recent * 1.3: score_vcp += 10
@@ -216,7 +252,7 @@ with tab_daily:
 
                     total_score = score_trend + score_rs + score_vol + score_vcp + score_mom
 
-                    # 風控檢驗：計算進場防守空間
+                    # 風控檢驗
                     entry_p = float(latest['Close'])
                     atr_v = float(latest['ATR']) if not np.isnan(latest['ATR']) else entry_p * 0.02
                     low_5d = float(df['Low'].tail(5).min())
@@ -228,12 +264,13 @@ with tab_daily:
                         total_score -= 30
 
                     final_score = max(0, total_score)
-                    sector_scores[sector_name].append(final_score)
+                    sector_scores[sec_name].append(final_score)
+                    sector_pcts[sec_name].append(pct_change)
 
                     results.append({
                         "name": name,
                         "code": code,
-                        "sector": sector_name,
+                        "sector": sec_name,
                         "total_score": final_score,
                         "score_trend": score_trend,
                         "score_rs": score_rs,
@@ -241,7 +278,7 @@ with tab_daily:
                         "score_vcp": score_vcp,
                         "score_mom": score_mom,
                         "close": entry_p,
-                        "pct": (latest['Close'] - prev['Close']) / prev['Close'] * 100,
+                        "pct": pct_change,
                         "rs_alpha": rs_alpha,
                         "vol_ratio": vol_ratio,
                         "stop_loss": stop_l,
@@ -255,45 +292,55 @@ with tab_daily:
                 results.sort(key=lambda x: x['total_score'], reverse=True)
                 top = results[0]
 
-                # 計算 1.5R 與 2.5R 目標價
                 risk_amt = top['close'] - top['stop_loss']
                 tp_1 = top['close'] + 1.5 * risk_amt
                 tp_2 = top['close'] + 2.5 * risk_amt
 
-                # 計算族群平均分
-                sector_avg = {sec: (np.mean(sc) if sc else 0) for sec, sc in sector_scores.items()}
-                top_sector = max(sector_avg, key=sector_avg.get)
+                # 統計族群排行
+                sector_summary = []
+                for sec in SECTOR_MAP.keys():
+                    sc_list = sector_scores[sec]
+                    pc_list = sector_pcts[sec]
+                    if sc_list:
+                        sector_summary.append({
+                            "族群名稱": sec,
+                            "平均動能分": np.mean(sc_list),
+                            "平均漲跌%": np.mean(pc_list),
+                            "標的數量": len(sc_list)
+                        })
+                sector_summary.sort(key=lambda x: x['平均動能分'], reverse=True)
+                top_sector = sector_summary[0]['族群名稱']
 
-                st.success(f"🏆 【今日全市場做多綜合評分冠軍】：**{top['name']}** ｜ 所屬族群：**【{top['sector']}】**")
-                st.caption(f"🔥 今日全市場最強資金集中族群：**【{top_sector}】** (族群平均得分：{sector_avg[top_sector]:.1f} 分)")
+                st.success(f"🏆 【今日全市場綜合評分首選】：**{top['name']}** ｜ 所屬族群：**【{top['sector']}】**")
+                st.caption(f"🔥 今日資金最強風口前三名族群：**1. {sector_summary[0]['族群名稱']}**（均分 {sector_summary[0]['平均動能分']:.1f}）｜ **2. {sector_summary[1]['族群名稱']}** ｜ **3. {sector_summary[2]['族群名稱']}**")
 
-                # 風控展示卡
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("🎯 建議現價進場點", f"{top['close']:.2f} 元", f"今日 {top['pct']:+.2f}%")
-                c2.metric("🛡️ 嚴格防守停損點", f"{top['stop_loss']:.2f} 元", f"-{top['risk_pct']:.2f}%", delta_color="inverse")
-                c3.metric("📈 第一止盈目標 (1.5R)", f"{tp_1:.2f} 元", f"+{((tp_1-top['close'])/top['close'])*100:.2f}%")
-                c4.metric("🚀 波段主力目標 (2.5R)", f"{tp_2:.2f} 元", f"+{((tp_2-top['close'])/top['close'])*100:.2f}%")
+                # 數值指標卡
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("🎯 建議現價進場點", f"{top['close']:.2f} 元", f"今日漲跌 {top['pct']:+.2f}%")
+                col2.metric("🛡️ 嚴格防守停損點", f"{top['stop_loss']:.2f} 元", f"-{top['risk_pct']:.2f}%", delta_color="inverse")
+                col3.metric("📈 第一止盈目標 (1.5R)", f"{tp_1:.2f} 元", f"+{((tp_1-top['close'])/top['close'])*100:.2f}%")
+                col4.metric("🚀 波段主力目標 (2.5R)", f"{tp_2:.2f} 元", f"+{((tp_2-top['close'])/top['close'])*100:.2f}%")
 
                 st.markdown("---")
-                st.subheader("🧠 大數據思考維度拆解 (系統為何選中它？)")
+                st.subheader("🧠 大數據深度思考維度拆解")
                 m_t, m_r, m_v, m_vc, m_m = st.columns(5)
-                m_t.metric("1. 趨勢與架構 (30%)", f"{top['score_trend']} / 30 分")
+                m_t.metric("1. 趨勢結構 (30%)", f"{top['score_trend']} / 30 分")
                 m_r.metric("2. 相對大盤 RS (25%)", f"{top['score_rs']} / 25 分", f"Alpha {top['rs_alpha']:+.2f}%")
                 m_v.metric("3. 威科夫量能 (20%)", f"{top['score_vol']} / 20 分", f"量比 {top['vol_ratio']:.2f}x")
                 m_vc.metric("4. 波動收縮 VCP (15%)", f"{top['score_vcp']} / 15 分")
                 m_m.metric("5. 時機動能 (10%)", f"{top['score_mom']} / 10 分")
 
                 st.info(f"""
-                **📌 操盤手作戰與風控指引：**
-                * **族群效應**：該股隸屬於 **{top['sector']}**，且具有領頭羊突破姿態。
-                * **相對優勢 (RS)**：近一個月超越大盤加權指數 **{top['rs_alpha']:+.2f}%**，顯現大戶抗跌吸籌強烈。
-                * **進出場守則**：
-                    * 買進參考價：**{top['close']:.2f} 元**。
-                    * 停損底線：若收盤價跌破 **{top['stop_loss']:.2f} 元**（控制虧損在 **{top['risk_pct']:.2f}%** 內），立即嚴格執行紀律出場。
-                    * 停利步驟：碰觸第一目標 **{tp_1:.2f} 元** 減碼 1/2 入袋，其餘部位將停損移至進場成本價，無風險博取波段目標 **{tp_2:.2f} 元**。
+                **📌 專業操盤作戰指引：**
+                * **族群共振優勢**：標的隸屬於 **{top['sector']}**，且處於主流資金輪動風口。
+                * **相對強度 (RS)**：近一個月相對加權指數跑出 **{top['rs_alpha']:+.2f}%** 的超額收益，展現法人主力積極買進抗跌的特徵。
+                * **戰術執行與風控**：
+                    * **買進時機**：於 **{top['close']:.2f} 元** 附近分批介入。
+                    * **停損守則**：若收盤價跌破 **{top['stop_loss']:.2f} 元**（單筆虧損控制在 **{top['risk_pct']:.2f}%** 內），立即嚴格離場，絕不凹單。
+                    * **停利節奏**：抵達第一目標 **{tp_1:.2f} 元** 先行獲利了結 1/2，剩餘倉位停損點移至買進成本保本，無壓力讓利潤奔跑至 **{tp_2:.2f} 元**。
                 """)
 
-                # 繪製點位 K 線圖
+                # 繪製視覺化點位圖
                 fig_top = go.Figure(data=[go.Candlestick(
                     x=top['df'].index[-45:],
                     open=top['df']['Open'][-45:],
@@ -305,31 +352,30 @@ with tab_daily:
                 fig_top.add_hline(y=top['stop_loss'], line_dash="dash", line_color="#0da651", annotation_text=f"停損線 {top['stop_loss']:.2f}")
                 fig_top.add_hline(y=tp_1, line_dash="dash", line_color="#eb4034", annotation_text=f"第一目標 {tp_1:.2f}")
                 fig_top.add_hline(y=tp_2, line_dash="dash", line_color="#f39c12", annotation_text=f"波段目標 {tp_2:.2f}")
-                fig_top.update_layout(height=450, title=f"{top['name']} ({top['sector']}) 關鍵防守與目標走勢圖", xaxis_rangeslider_visible=False)
+                fig_top.update_layout(height=460, title=f"{top['name']} ({top['sector']}) 關鍵防守與目標走勢圖", xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig_top, use_container_width=True)
 
                 st.session_state['results'] = results
-                st.session_state['sector_avg'] = sector_avg
+                st.session_state['sector_summary'] = sector_summary
             else:
-                st.warning("市場目前處於深幅回檔期，無符合嚴格做多標準之標的，建議空手保護本金。")
+                st.warning("市場正處於劇烈下修期，無符合嚴格高盈虧比標準之標的，請嚴格空手以保護資金。")
     else:
-        st.write("👉 點擊上方按鈕，系統將自動演算 PCB、記憶體、CPO、散熱等 10 大熱門族群指標股。")
+        st.write("👉 點擊上方按鈕，系統將自動啟動 20 大主流板塊的平行量化運算。")
 
 # =========================================================
 # 分頁 2：族群熱度與全體評分榜
 # =========================================================
 with tab_rank:
-    st.header("🔥 時代尖端族群熱度與多因子評分全景榜")
+    st.header("🔥 20 大尖端族群動能熱度與多因子全景榜")
     if 'results' in st.session_state and st.session_state['results']:
-        # 顯示族群熱度排行
-        st.subheader("📊 10 大尖端族群動能熱度排行")
-        sec_df = pd.DataFrame([
-            {"族群名稱": k, "族群平均動能分": f"{v:.1f} 分"} 
-            for k, v in sorted(st.session_state['sector_avg'].items(), key=lambda x: x[1], reverse=True)
-        ])
+        st.subheader("📊 20 大主流族群動能綜合排行 (即時熱度)")
+        sec_df = pd.DataFrame(st.session_state['sector_summary'])
+        sec_df['平均動能分'] = sec_df['平均動能分'].apply(lambda x: f"{x:.1f} 分")
+        sec_df['平均漲跌%'] = sec_df['平均漲跌%'].apply(lambda x: f"{x:+.2f}%")
         st.dataframe(sec_df, use_container_width=True)
 
-        st.subheader("📋 所有個股綜合評分明細")
+        st.markdown("---")
+        st.subheader("📋 85 檔個股多維度加權評分明細")
         filter_sec = st.selectbox("依族群篩選查看", ["全部族群"] + list(SECTOR_MAP.keys()))
         
         table_rows = []
@@ -342,7 +388,7 @@ with tab_rank:
                 "總分": r['total_score'],
                 "現價": f"{r['close']:.2f}",
                 "今日漲跌%": f"{r['pct']:+.2f}%",
-                "相對大盤RS超額%": f"{r['rs_alpha']:+.2f}%",
+                "相對大盤RS%": f"{r['rs_alpha']:+.2f}%",
                 "量比 (Vol/5MA)": f"{r['vol_ratio']:.2f}x",
                 "趨勢(30)": r['score_trend'],
                 "RS(25)": r['score_rs'],
@@ -353,7 +399,7 @@ with tab_rank:
             })
         st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
     else:
-        st.info("請先在第一分頁點擊『啟動 10 大主流族群大數據動能掃描』，數據將在此自動呈現。")
+        st.info("請先至第一分頁點擊『啟動 20 大主流族群大數據掃描』，數據將自動在此生成。")
 
 # =========================================================
 # 分頁 3：個股深入技術診斷 (全功能保留)
@@ -401,7 +447,7 @@ with tab_detail:
 
         fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=r_heights, subplot_titles=sub_titles)
 
-        # 1. K 線圖 (紅漲綠跌)
+        # 1. K 線圖 (台股紅漲綠跌)
         fig.add_trace(go.Candlestick(
             x=df_d.index, open=df_d['Open'], high=df_d['High'], low=df_d['Low'], close=df_d['Close'],
             name="K線", increasing_line_color='#eb4034', decreasing_line_color='#0da651'

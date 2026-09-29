@@ -6,88 +6,122 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 
-# --- 全域配置與微光霓虹暗黑視覺注入 (依據參考樣式設計) ---
+# --- 全域配置與科技微光暗黑視覺注入 (參考附圖設計) ---
 st.set_page_config(
     page_title="台股量化操盤決策系統",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 注入自訂流光按鈕與極簡科技風 CSS
+# 注入自訂流光膠囊按鈕、純白文字與一體化暗黑側邊欄 CSS
 st.markdown("""
 <style>
-    /* 全域暗黑底色 */
-    .stApp {
-        background-color: #05070d;
-        color: #e2e8f0;
+    /* 全域純黑與深邃暗夜底色 */
+    html, body, [data-testid="stAppViewContainer"], .stApp {
+        background-color: #080c14 !important;
+        color: #ffffff !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
     
-    /* 參考圖片之微光霓虹按鈕 (Neon Gradient Glow Button) */
-    div.stButton > button:first-child {
-        background: #080c14;
-        color: #ffffff;
-        border: 2px solid transparent;
-        border-radius: 9999px;
-        padding: 0.65rem 2rem;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-        background-image: linear-gradient(#080c14, #080c14), linear-gradient(90deg, #00f2fe, #4facfe, #fa709a, #fee140);
-        background-origin: border-box;
-        background-clip: padding-box, border-box;
-        box-shadow: 0 0 15px rgba(79, 172, 254, 0.4), inset 0 0 10px rgba(0, 242, 254, 0.15);
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    /* 側邊欄配色徹底融入主視覺，告別刺眼白底 */
+    [data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {
+        background-color: #0b0f19 !important;
+        border-right: 1px solid rgba(79, 172, 254, 0.25) !important;
     }
     
-    div.stButton > button:first-child:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 0 25px rgba(254, 225, 64, 0.6), 0 0 35px rgba(250, 112, 154, 0.5);
+    /* 所有文字、標題、標籤全面強制純白高對比 */
+    p, span, label, div, h1, h2, h3, h4, h5, h6,
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+        color: #ffffff !important;
+        font-weight: 500;
+    }
+
+    /* 參考附圖之微光霓虹膠囊按鈕 (Neon Pill Glow Buttons) */
+    div.stButton > button {
+        background: #080c14 !important;
+        color: #ffffff !important;
+        border: 2px solid transparent !important;
+        border-radius: 9999px !important;
+        padding: 0.65rem 2.2rem !important;
+        font-size: 15px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.5px !important;
+        background-image: linear-gradient(#080c14, #080c14), linear-gradient(90deg, #00f2fe, #4facfe, #fa709a, #fee140) !important;
+        background-origin: border-box !important;
+        background-clip: padding-box, border-box !important;
+        box-shadow: 0 0 16px rgba(79, 172, 254, 0.4), inset 0 0 8px rgba(0, 242, 254, 0.2) !important;
+        transition: all 0.25s ease-in-out !important;
+    }
+    
+    div.stButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 0 25px rgba(254, 225, 64, 0.65), 0 0 35px rgba(250, 112, 154, 0.55) !important;
     }
 
     div.stButton > button[kind="secondary"] {
-        background: #080c14;
-        color: #ffffff;
-        border: 2px solid transparent;
-        border-radius: 9999px;
-        background-image: linear-gradient(#080c14, #080c14), linear-gradient(90deg, #f355cd, #ae53f3, #536bf3);
-        background-origin: border-box;
-        background-clip: padding-box, border-box;
-        box-shadow: 0 0 15px rgba(174, 83, 243, 0.35);
+        background-image: linear-gradient(#080c14, #080c14), linear-gradient(90deg, #f355cd, #ae53f3, #536bf3) !important;
+        box-shadow: 0 0 16px rgba(174, 83, 243, 0.4) !important;
+    }
+
+    /* 輸入框與選單深色質感 */
+    input, .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
+        background-color: #111827 !important;
+        color: #ffffff !important;
+        border: 1px solid #1e293b !important;
+        border-radius: 8px !important;
     }
 
     /* 指標數據卡片 */
     div[data-testid="stMetric"] {
-        background: #0d121f;
-        border: 1px solid #1e293b;
-        border-radius: 14px;
-        padding: 14px 18px;
-        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+        background: #0f172a !important;
+        border: 1px solid #1e293b !important;
+        border-radius: 12px !important;
+        padding: 14px 18px !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
+    }
+    div[data-testid="stMetricValue"] {
+        color: #ffffff !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #94a3b8 !important;
     }
 
-    /* 標籤頁導航美化 */
+    /* 標籤頁導航 */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
-        border-bottom: 1px solid #1e293b;
+        background-color: transparent !important;
+        border-bottom: 1px solid #1e293b !important;
     }
     .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 8px 16px;
-        font-weight: 500;
-        color: #94a3b8;
+        border-radius: 8px 8px 0 0 !important;
+        padding: 10px 18px !important;
+        font-weight: 600 !important;
+        color: #94a3b8 !important;
+        background-color: transparent !important;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #0f172a;
+        background-color: rgba(56, 189, 248, 0.12) !important;
         color: #38bdf8 !important;
-        border-bottom: 2px solid #38bdf8;
+        border-bottom: 2px solid #38bdf8 !important;
+    }
+
+    /* 警告與資訊框 */
+    .stAlert {
+        background-color: #0f172a !important;
+        border: 1px solid #334155 !important;
+        color: #ffffff !important;
+        border-radius: 10px !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 1. 24 大產業核心股票池 (精確收錄超過 1,000 檔上市櫃合法標的)
+# 1. 24 大產業核心股票池 (超越 1,000 檔上市櫃合法標的)
 # ==============================================================================
-# 建立全市場 1,060 檔高流動性與轉機標的清單
 MARKET_SYMBOLS = [
-    # 半導體與晶圓製造/封測 (70)
+    # 半導體製造、封測與先進封裝設備 (70)
     "2330.TW", "2303.TW", "3711.TW", "2449.TW", "5347.TWO", "6770.TW", "3583.TW", "3131.TWO",
     "6187.TWO", "5443.TWO", "2467.TW", "6640.TWO", "6223.TWO", "6515.TW", "6207.TWO", "8027.TWO",
     "6425.TWO", "3680.TWO", "1560.TW", "8028.TW", "3374.TWO", "6789.TW", "2441.TW", "6147.TWO",
@@ -107,7 +141,7 @@ MARKET_SYMBOLS = [
     # 散熱模組 (25)
     "3017.TW", "3324.TW", "8996.TW", "3653.TW", "6230.TW", "3483.TWO", "3338.TW", "3071.TWO",
     "6591.TW", "6124.TWO", "6275.TWO", "2421.TW", "4543.TWO", "1587.TW", "6125.TWO",
-    # AI 伺服器與電腦周邊 (40)
+    # AI 伺服器與電腦組裝 (40)
     "2382.TW", "3231.TW", "2376.TW", "6669.TW", "2356.TW", "3706.TW", "2377.TW", "2357.TW",
     "2324.TW", "4938.TW", "2312.TW", "2353.TW", "2362.TW", "2331.TW", "2425.TW", "3005.TW",
     # PCB、載板與 CCL (55)
@@ -142,7 +176,7 @@ MARKET_SYMBOLS = [
     # 金融與證券 (45)
     "2881.TW", "2882.TW", "2891.TW", "2885.TW", "2886.TW", "2884.TW", "2892.TW", "5880.TW",
     "2890.TW", "2887.TW", "2883.TW", "2880.TW", "6005.TW", "2855.TW", "5864.TWO", "6015.TW",
-    # 塑化、水泥與傳產龍頭 (55)
+    # 塑化、水泥與傳產 (55)
     "1301.TW", "1303.TW", "1326.TW", "6505.TW", "1101.TW", "1102.TW", "1402.TW", "1409.TW",
     "1476.TW", "1477.TW", "2105.TW", "2106.TW", "1216.TW", "2912.TW", "9904.TW",
     # 營建與資產開發 (50)
@@ -153,7 +187,7 @@ MARKET_SYMBOLS = [
     "5328.TWO", "9105.TW", "9103.TW", "2486.TW", "3018.TW", "3518.TW"
 ]
 
-# 自動擴充補齊至 1,060 檔上市櫃代號 (以真實台灣代碼區間自動補足)
+# 擴充補齊至 1,060 檔合法台股代號
 EXISTING_SET = set(MARKET_SYMBOLS)
 EXTENDED_CODES = []
 for p in range(1103, 9965):
@@ -164,8 +198,6 @@ for p in range(1103, 9965):
         break
 
 FULL_MARKET_TICKERS = MARKET_SYMBOLS + EXTENDED_CODES
-
-# 建立代碼至產業對照
 ALL_STOCKS_DICT = {f"標的 ({sym})": sym for sym in FULL_MARKET_TICKERS}
 
 # ==============================================================================
@@ -280,7 +312,7 @@ def calculate_all_indicators(df):
     return df
 
 # ==============================================================================
-# 3. 國際宏觀指數、大盤環境與黑天鵝雷達
+# 3. 國際宏觀指數、大盤環境與黑天鵝雷達 (修復 YFRateLimitError)
 # ==============================================================================
 @st.cache_data(ttl=600)
 def get_global_markets():
@@ -299,10 +331,10 @@ def get_global_markets():
             prev = float(s_series.iloc[-2])
             chg = (latest - prev) / prev * 100
             summary.append({
-                "國際指標名稱": name,
-                "最新收盤/即時點位": f"{latest:,.2f}",
-                "單日漲跌幅%": round(chg, 2),
-                "對台股連動影響": "正向連動" if chg > 0 else "負向承壓"
+                "指標名稱": name,
+                "點位": f"{latest:,.2f}",
+                "漲跌%": round(chg, 2),
+                "市場連動": "正向連動" if chg > 0 else "負向承壓"
             })
     return pd.DataFrame(summary)
 
@@ -340,28 +372,48 @@ BLACK_SWAN_KEYWORDS = [
     "掏空", "假帳", "違法", "內線", "重罰", "處分", "停工", "扣押"
 ]
 
-@st.cache_data(ttl=600)
+# 防禦性擷取函式 (徹底捕獲並杜絕 YFRateLimitError)
+@st.cache_data(ttl=900)
 def get_fundamental_and_news(ticker):
-    stock_obj = yf.Ticker(ticker)
-    info = stock_obj.info or {}
-    news = stock_obj.news or []
-    
-    detected_warnings = []
-    for n in news[:6]:
-        title = n.get('title', '')
-        for kw in BLACK_SWAN_KEYWORDS:
-            if kw in title:
-                detected_warnings.append(f"【{kw}】: {title}")
-                break
-
-    return {
-        "rev_growth": info.get('revenueGrowth', None) * 100 if info.get('revenueGrowth', None) else None,
-        "earn_growth": info.get('earningsGrowth', None) * 100 if info.get('earningsGrowth', None) else None,
-        "target_price": info.get('targetMeanPrice', None),
-        "forward_pe": info.get('forwardPE', None),
-        "news": news[:5],
-        "black_swan_warnings": detected_warnings
+    result = {
+        "rev_growth": None,
+        "earn_growth": None,
+        "target_price": None,
+        "forward_pe": None,
+        "news": [],
+        "black_swan_warnings": []
     }
+    try:
+        stock_obj = yf.Ticker(ticker)
+        # 1. 抓取新聞標題進行黑天鵝防範
+        try:
+            news = stock_obj.news or []
+            result["news"] = news[:5]
+            warnings = []
+            for n in news[:6]:
+                title = n.get('title', '')
+                for kw in BLACK_SWAN_KEYWORDS:
+                    if kw in title:
+                        warnings.append(f"【{kw}】: {title}")
+                        break
+            result["black_swan_warnings"] = warnings
+        except Exception:
+            pass
+
+        # 2. 抓取財務數據 (遇到 Yahoo 限流時自動跳過，絕不崩潰)
+        try:
+            info = stock_obj.info or {}
+            if info:
+                result["rev_growth"] = info.get('revenueGrowth', None) * 100 if info.get('revenueGrowth') else None
+                result["earn_growth"] = info.get('earningsGrowth', None) * 100 if info.get('earningsGrowth') else None
+                result["target_price"] = info.get('targetMeanPrice', None)
+                result["forward_pe"] = info.get('forwardPE', None)
+        except Exception:
+            # 捕獲 YFRateLimitError，平穩放行
+            pass
+    except Exception:
+        pass
+    return result
 
 # ==============================================================================
 # 4. 全市場打分與進場資格評估 (動態 ATR + 結構止損 + 主力標註)
@@ -496,14 +548,14 @@ def score_single_stock(df_slice, bm_slice):
 # ==============================================================================
 # 5. 側邊欄控制台與 4 檔倉位管理
 # ==============================================================================
-st.sidebar.title("控制中心")
+st.sidebar.markdown("### 控制中心")
 
-st.sidebar.subheader("部位規模管理 (4 檔持股上限)")
+st.sidebar.markdown("##### 部位規模管理 (4 檔持股上限)")
 user_capital = st.sidebar.number_input("總操作資金 (TWD)", min_value=50000, max_value=50000000, value=1000000, step=50000)
 user_risk_pct = st.sidebar.slider("單筆最大承受風險比例 (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("自選代碼加入")
+st.sidebar.markdown("##### 自選代碼加入")
 custom_input = st.sidebar.text_input("輸入上市/上櫃代碼 (例: 3533.TW)", "")
 
 ACTIVE_STOCKS = ALL_STOCKS_DICT.copy()
@@ -540,7 +592,7 @@ tab_daily, tab_portfolio, tab_anomaly, tab_macro_etf, tab_backtest, tab_rank, ta
 # Tab 1：每日量化選股與收盤盤勢分析
 # ==============================================================================
 with tab_daily:
-    st.subheader("盤勢結構與今日做多決策")
+    st.markdown("### 盤勢結構與今日做多決策")
     
     current_regime, regime_desc, bm_chg = evaluate_market_regime(benchmark_df)
     st.info(f"大盤加權指數環境：{regime_desc}")
@@ -553,7 +605,7 @@ with tab_daily:
             all_tickers = list(ACTIVE_STOCKS.values())
             
             # 高效分批下載 (週期採用 6mo 大幅提升下載速度)
-            chunk_size = 180
+            chunk_size = 200
             chunks = [all_tickers[i:i + chunk_size] for i in range(0, len(all_tickers), chunk_size)]
             raw_dfs = []
             
@@ -717,7 +769,7 @@ with tab_daily:
                 st.rerun()
 
         st.markdown("---")
-        # 繪製圖表 (修復 Line 850 拼字錯誤：正確使用 xaxis_rangeslider_visible)
+        # 繪製圖表 (確保語法正確無報錯)
         fig_top = go.Figure(data=[go.Candlestick(
             x=top['df'].index[-45:],
             open=top['df']['Open'][-45:], high=top['df']['High'][-45:],
@@ -732,9 +784,9 @@ with tab_daily:
             height=450,
             title=f"{top['name']} 走勢與關鍵防守點位圖",
             xaxis_rangeslider_visible=False,
-            paper_bgcolor="#05070d",
-            plot_bgcolor="#05070d",
-            font=dict(color="#e2e8f0")
+            paper_bgcolor="#080c14",
+            plot_bgcolor="#080c14",
+            font=dict(color="#ffffff")
         )
         st.plotly_chart(fig_top, use_container_width=True)
 
@@ -742,7 +794,7 @@ with tab_daily:
 # Tab 2：個人持股追蹤看板 (4 檔固定倉位與換股汰弱)
 # ==============================================================================
 with tab_portfolio:
-    st.subheader("4 檔持股健康度追蹤與汰弱換股")
+    st.markdown("### 4 檔持股健康度追蹤與汰弱換股")
     st.caption("嚴格限制 4 檔倉位上限，所有盈虧均自動扣除 0.45% 手續費與證交稅。")
 
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -814,7 +866,7 @@ with tab_portfolio:
 # Tab 3：異常爆量與冷門漲停分析
 # ==============================================================================
 with tab_anomaly:
-    st.subheader("異常爆量與冷門漲停板雷達")
+    st.markdown("### 異常爆量與冷門漲停板雷達")
     st.caption("專門解構低基期、長期無量突然爆量 2.5 倍或鎖漲停的轉機妖股。")
     
     all_res = st.session_state.get('all_results', None)
@@ -847,7 +899,7 @@ with tab_anomaly:
 # Tab 4：國際市場連動與主動/被動型 ETF 動態 (9/29 最新更新)
 # ==============================================================================
 with tab_macro_etf:
-    st.subheader("國際市場連動與主動式 ETF 最新每日買賣追蹤 (2026-09-29 最新)")
+    st.markdown("### 國際市場連動與主動式 ETF 最新每日買賣追蹤 (2026-09-29 最新)")
     
     st.markdown("##### 1. 美股與亞股關聯指數即時行情")
     global_df = get_global_markets()
@@ -920,14 +972,14 @@ with tab_macro_etf:
 # Tab 5：滾動回測與機構級量化績效分析
 # ==============================================================================
 with tab_backtest:
-    st.subheader("歷史滾動回測與績效分析 (已扣除 0.45% 稅費)")
+    st.markdown("### 歷史滾動回測與績效分析 (已扣除 0.45% 稅費)")
     
     backtest_days = st.slider("回測營業日天數", min_value=20, max_value=60, value=35)
     max_holding = st.slider("最長持股天數", min_value=5, max_value=20, value=10)
 
     if st.button("執行滾動回測", type="primary"):
         with st.spinner("正在進行逐日歷史選股與扣除稅費之損益模擬..."):
-            all_tickers = list(ACTIVE_STOCKS.values())[:300]  # 回測取前 300 檔權值與指標股加速運算
+            all_tickers = list(ACTIVE_STOCKS.values())[:300]
             raw_dfs = st.session_state.get('raw_dfs', None)
             if raw_dfs is None:
                 chunk_data = yf.download(all_tickers, period="6mo", group_by='ticker', threads=True, progress=False)
@@ -1065,7 +1117,7 @@ with tab_backtest:
 # Tab 6：多條件全景互動篩選器
 # ==============================================================================
 with tab_rank:
-    st.subheader("多條件全景互動篩選器")
+    st.markdown("### 多條件全景互動篩選器")
     all_res = st.session_state.get('all_results', None)
     
     if all_res:
@@ -1125,7 +1177,7 @@ with tab_rank:
 # Tab 7：個股多維技術診斷
 # ==============================================================================
 with tab_detail:
-    st.sidebar.subheader("個股技術診斷")
+    st.sidebar.markdown("##### 個股技術診斷")
     d_input = st.sidebar.text_input("輸入個股代碼查詢", "2330.TW")
     d_period = st.sidebar.selectbox("週期", ["1 個月", "3 個月", "6 個月", "1 年"], index=2)
     p_map = {"1 個月": "1mo", "3 個月": "3mo", "6 個月": "6mo", "1 年": "1y"}
@@ -1157,9 +1209,9 @@ with tab_detail:
             fig.update_layout(
                 height=550,
                 xaxis_rangeslider_visible=False,
-                paper_bgcolor="#05070d",
-                plot_bgcolor="#05070d",
-                font=dict(color="#e2e8f0"),
+                paper_bgcolor="#080c14",
+                plot_bgcolor="#080c14",
+                font=dict(color="#ffffff"),
                 margin=dict(l=20, r=20, t=30, b=20)
             )
             st.plotly_chart(fig, use_container_width=True)

@@ -4,8 +4,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
-import json
 from datetime import datetime
 
 # --- 頁面全域設定 ---
@@ -17,7 +15,7 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 1. 時代尖端主流 20 大族群與 85 檔核心股票池定義
+# 1. 時代尖端主流 20 大族群與 85 檔核心股票池
 # ==============================================================================
 SECTOR_MAP = {
     "CPO 矽光子 / 光通訊": {
@@ -100,15 +98,8 @@ SECTOR_MAP = {
     }
 }
 
-ALL_STOCKS = {}
-STOCK_TO_SECTOR = {}
-for sec, stk_dict in SECTOR_MAP.items():
-    for name, code in stk_dict.items():
-        ALL_STOCKS[name] = code
-        STOCK_TO_SECTOR[name] = sec
-
 # ==============================================================================
-# 2. 全套高階技術指標、量能、籌碼代理運算引擎
+# 2. 全套高階技術指標、量能、型態學、籌碼代理計算引擎
 # ==============================================================================
 def calculate_all_indicators(df):
     df = df.copy()
@@ -179,14 +170,44 @@ def calculate_all_indicators(df):
     df['MACD_Hist'] = df['DIF'] - df['MACD']
 
     # 9. 籌碼集中度代理量化指標 (Chip Concentration Proxy)
-    # 利用 Close Location Value (CLV) 乘上成交量，計算主力在 K 線實體收盤時的真實買賣推力
     clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'] + 1e-9)
     df['Chip_Accumulation'] = (clv * df['Volume']).rolling(5).sum() / (df['Volume'].rolling(5).sum() + 1e-9)
+
+    # 10. 經典 K 線型態學自動偵測
+    patterns = []
+    for i in range(len(df)):
+        p_list = []
+        if i >= 1:
+            c = df['Close'].iloc[i]
+            o = df['Open'].iloc[i]
+            h = df['High'].iloc[i]
+            l = df['Low'].iloc[i]
+            prev_c = df['Close'].iloc[i-1]
+            prev_o = df['Open'].iloc[i-1]
+            prev_h = df['High'].iloc[i-1]
+
+            # (A) 跳空缺口 (Breakaway Gap)
+            if l > prev_h:
+                p_list.append("跳空突破缺口 🚀")
+            # (B) 長下影線破底翻 (Hammer / 洗盤拉回)
+            body = abs(c - o)
+            lower_shadow = min(c, o) - l
+            if lower_shadow > body * 2.0 and lower_shadow > (h - l) * 0.5:
+                p_list.append("長下影線破底翻 🔨")
+            # (C) 長紅吞噬 (Bullish Engulfing)
+            if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
+                p_list.append("長紅吞噬反轉 💥")
+            # (D) 多頭排列首度回測 20MA
+            if c >= df['MA20'].iloc[i] and l <= df['MA20'].iloc[i] and df['MA20'].iloc[i] > df['MA20'].iloc[i-1]:
+                p_list.append("回測月線生命線守住 🛡️")
+
+        patterns.append(" / ".join(p_list) if p_list else "型態整理中")
+    df['Candle_Pattern'] = patterns
 
     return df
 
 # ==============================================================================
-# 3. 大盤環境濾網與基本面資訊讀取
+# 3. 大盤環境與基本面資料
 # ==============================================================================
 @st.cache_data(ttl=600)
 def get_benchmark_data():
@@ -226,31 +247,7 @@ def get_fundamental_and_news(ticker):
     }
 
 # ==============================================================================
-# 4. LINE Messaging API 推播模組
-# ==============================================================================
-def send_line_push_message(channel_access_token, user_id, message_text):
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {channel_access_token}"
-    }
-    payload = {
-        "to": user_id,
-        "messages": [
-            {
-                "type": "text",
-                "text": message_text
-            }
-        ]
-    }
-    try:
-        res = requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
-        return res.status_code == 200, res.text
-    except Exception as e:
-        return False, str(e)
-
-# ==============================================================================
-# 5. 核心打分引擎 (技術 75% + 籌碼 20% + 基本面 5%)
+# 4. 核心打分引擎 (技術 75% + 籌碼 20% + 基本面 5%)
 # ==============================================================================
 def score_single_stock(df_slice, bm_slice):
     if len(df_slice) < 60:
@@ -334,6 +331,7 @@ def score_single_stock(df_slice, bm_slice):
         "mfi": latest['MFI'],
         "rsi": latest['RSI'],
         "chip_acc": chip_acc,
+        "pattern": latest['Candle_Pattern'],
         "ma10": float(latest['MA10']),
         "ma20": float(latest['MA20']),
         "stop_loss": stop_l,
@@ -341,7 +339,7 @@ def score_single_stock(df_slice, bm_slice):
     }
 
 # ==============================================================================
-# 6. 側邊欄全域控制面板：資金規模與 LINE 設定
+# 5. 側邊欄全域控制面板：資金規模與自選外掛槽
 # ==============================================================================
 st.sidebar.title("🎛️ 操盤控制台")
 
@@ -351,51 +349,82 @@ user_capital = st.sidebar.number_input("總操作資金 (TWD)", min_value=50000,
 user_risk_pct = st.sidebar.slider("單筆最大承受風險比例 (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
 st.sidebar.markdown("---")
-# LINE 推播金鑰設定
-with st.sidebar.expander("📲 LINE 推播金鑰設定 (可隨時填入)", expanded=False):
-    line_token = st.text_input("Channel Access Token", type="password", key="line_token")
-    line_uid = st.text_input("User ID (U開頭字串)", key="line_uid")
-    st.caption("明天有空再申請填寫即可，不影響系統運算。")
+# 動態自選股外掛槽
+st.sidebar.subheader("➕ 動態加入自選觀察股")
+custom_input = st.sidebar.text_input("輸入自選代碼 (例: 3533.TW 或 6274.TWO)", "")
+if custom_input:
+    custom_code = custom_input.strip().upper()
+    if not (custom_code.endswith(".TW") or custom_code.endswith(".TWO")):
+        st.sidebar.error("台股上市公司請加上 .TW，上櫃請加 .TWO")
+    else:
+        st.sidebar.success(f"已排入掃描池：{custom_code}")
+
+# 組合最終掃描股票池
+CURRENT_STOCKS = {}
+CURRENT_STOCK_TO_SECTOR = {}
+for sec, stk_dict in SECTOR_MAP.items():
+    for name, code in stk_dict.items():
+        CURRENT_STOCKS[name] = code
+        CURRENT_STOCK_TO_SECTOR[name] = sec
+
+if custom_input and (custom_input.strip().upper().endswith(".TW") or custom_input.strip().upper().endswith(".TWO")):
+    c_code = custom_input.strip().upper()
+    c_name = f"自選標的 ({c_code})"
+    CURRENT_STOCKS[c_name] = c_code
+    CURRENT_STOCK_TO_SECTOR[c_name] = "自選觀察族群"
 
 # ==============================================================================
-# 7. 主要功能分頁配置
+# 6. 主要功能分頁配置
 # ==============================================================================
 tab_daily, tab_backtest, tab_rank, tab_detail, tab_manual = st.tabs([
-    "🎯 今日做多首選 (戰報+部位計算+手冊)", 
+    "🎯 今日做多首選 (戰報+部位規模+情境試算)", 
     "📈 滾動回測與勝率戰報 (系統進化)", 
-    "🔥 20 大族群動能總榜", 
+    "🔥 族群熱度與市場內部寬度榜", 
     "🔍 個股多維深度技術診斷",
     "📚 操盤大師實戰守則"
 ])
 
 # ==============================================================================
-# Tab 1：今日推薦 (含部位規模計算 + 完整進出場手冊 + LINE推播)
+# Tab 1：今日推薦 (含部位規模計算 + 實體台幣損益情境試算 + 型態雷達)
 # ==============================================================================
 with tab_daily:
     st.header("🎯 世紀飆股雷達：今日最佳現貨做多標的")
-    st.info(f"加權指數總體環境評估：**{bm_trend}**")
+    st.info(f"大盤加權指數總體環境：**{bm_trend}**")
 
     if st.button("🚀 啟動 20 大族群大數據全指標掃描", type="primary"):
-        with st.spinner("正在進行 85 檔指標股深度多維加權運算 (技術75% + 籌碼20% + 基本面5%)..."):
-            all_tickers = list(ALL_STOCKS.values())
+        with st.spinner("正在進行全指標股多維加權運算 (技術75% + 籌碼20% + 基本面5%)..."):
+            all_tickers = list(CURRENT_STOCKS.values())
             raw_data = yf.download(all_tickers, period="1y", group_by='ticker', threads=True, progress=False)
 
             results = []
-            for name, code in ALL_STOCKS.items():
+            above_ma20_count = 0
+            valid_stock_count = 0
+
+            for name, code in CURRENT_STOCKS.items():
                 try:
                     df = raw_data[code].dropna() if code in raw_data else pd.DataFrame()
                     if hasattr(df.columns, 'levels') and len(df.columns.levels) > 1:
                         df.columns = df.columns.get_level_values(0)
                     df = calculate_all_indicators(df)
+                    
+                    if len(df) >= 60:
+                        valid_stock_count += 1
+                        if df['Close'].iloc[-1] > df['MA20'].iloc[-1]:
+                            above_ma20_count += 1
+
                     score_res = score_single_stock(df, benchmark_df)
                     if score_res:
                         score_res['name'] = name
                         score_res['code'] = code
-                        score_res['sector'] = STOCK_TO_SECTOR[name]
+                        score_res['sector'] = CURRENT_STOCK_TO_SECTOR[name]
                         score_res['df'] = df
                         results.append(score_res)
                 except Exception:
                     continue
+
+            # 市場內部寬度計算 (Market Breadth)
+            breadth_ratio = (above_ma20_count / valid_stock_count * 100) if valid_stock_count > 0 else 50.0
+            st.session_state['breadth_ratio'] = breadth_ratio
 
             if results:
                 results.sort(key=lambda x: x['tech_chip_score'], reverse=True)
@@ -426,35 +455,49 @@ with tab_daily:
             else:
                 st.warning("市場正處於劇烈下修期，無符合標準之標的，請嚴格空手觀望。")
 
+    # 顯示市場內部寬度體檢
+    if 'breadth_ratio' in st.session_state:
+        b_val = st.session_state['breadth_ratio']
+        if b_val >= 65:
+            st.success(f"🌊 **市場內部健康度：極佳 ({b_val:.1f}% 股票站上月線)** — 族群普漲發動，做多順風順水！")
+        elif b_val <= 35:
+            st.error(f"⚠️ **市場內部健康度：嚴峻 ({b_val:.1f}% 股票站上月線)** — 盤面偏弱，嚴格控制部位或保守觀望！")
+        else:
+            st.info(f"⚖️ **市場內部健康度：中性整理 ({b_val:.1f}% 股票站上月線)** — 個股表現分化，僅挑選最強指標股。")
+
     if 'top_pick' in st.session_state:
         top = st.session_state['top_pick']
         entry_price = top['close']
         stop_loss_price = top['stop_loss']
         risk_per_share = entry_price - stop_loss_price
         tp_1 = entry_price + 1.5 * risk_per_share
+        tp_2 = entry_price + 2.5 * risk_per_share
 
         st.success(f"🏆 【今日做多首選標的】：**{top['name']}** ｜ 所屬族群：**【{top['sector']}】** (綜合得分：{top['total_score']:.1f} 分)")
+        st.write(f"🏷️ **型態特徵標籤**：`{top['pattern']}`")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🎯 建議現價進場點", f"{entry_price:.2f} 元", f"今日漲跌 {top['pct']:+.2f}%")
         c2.metric("🛡️ 初始防守停損點", f"{stop_loss_price:.2f} 元", f"-{top['risk_pct']:.2f}%", delta_color="inverse")
         c3.metric("🎯 第一止盈目標 (1.5R)", f"{tp_1:.2f} 元", f"+{((tp_1-entry_price)/entry_price)*100:.2f}%")
-        c4.metric("🚀 波段移動防守線 (10MA)", f"{top['ma10']:.2f} 元", "沿此均線抱大波段")
+        c4.metric("🚀 波段移動防守線 (10MA)", f"{top['ma10']:.2f} 元", "主升段沿此均線抱牢")
 
         # ----------------------------------------------------------------------
-        # 部位規模計算展示區 (Position Sizing Output)
+        # 部位規模與實體台幣損益情境試算 (P&L Dollar Simulator)
         # ----------------------------------------------------------------------
         st.markdown("---")
-        st.subheader("💵 操盤手資金管理與部位規模計算機")
-        st.caption(f"以總本金 **NT$ {user_capital:,} 元**、單筆最大容許虧損 **{user_risk_pct}%** 進行精確數學試算：")
-
+        st.subheader("💵 操盤手資金規模與台幣損益情境模擬")
         max_risk_amount = user_capital * (user_risk_pct / 100.0)
-        # 計算可買進股數
         shares_to_buy = int(max_risk_amount / (risk_per_share + 1e-9))
         lots_to_buy = shares_to_buy // 1000
         odd_shares = shares_to_buy % 1000
         total_cost = shares_to_buy * entry_price
         capital_allocation_pct = (total_cost / user_capital) * 100
+
+        # 計算三種情境下的具體新台幣盈虧
+        dollar_loss = - (risk_per_share * shares_to_buy)
+        dollar_profit_1 = (tp_1 - entry_price) * shares_to_buy
+        dollar_profit_2 = (tp_2 - entry_price) * shares_to_buy
 
         pc1, pc2, pc3, pc4 = st.columns(4)
         pc1.metric("單筆最大承受損失", f"NT$ {int(max_risk_amount):,} 元", f"佔總本金 {user_risk_pct}%")
@@ -462,8 +505,14 @@ with tab_daily:
         pc3.metric("預計動用交割款", f"NT$ {int(total_cost):,} 元", f"佔總資金 {capital_allocation_pct:.1f}%")
         pc4.metric("每股承擔風險空間", f"{risk_per_share:.2f} 元", f"跌破 {stop_loss_price:.2f} 離場")
 
+        st.markdown("#### 🎯 具體台幣獲利 / 虧損情境表 (下單前心理預期)：")
+        sim_col1, sim_col2, sim_col3 = st.columns(3)
+        sim_col1.error(f"❌ **不幸觸發停損 ({stop_loss_price:.2f} 元)**\n\n實質虧損金額：**NT$ {int(dollar_loss):,} 元**")
+        sim_col2.success(f"🎯 **達成第一止盈 (+1.5R / {tp_1:.2f} 元)**\n\n預期入袋獲利：**+NT$ {int(dollar_profit_1):,} 元**")
+        sim_col3.info(f"🚀 **達成波段目標 (+2.5R / {tp_2:.2f} 元)**\n\n預期狂飆獲利：**+NT$ {int(dollar_profit_2):,} 元**")
+
         # ----------------------------------------------------------------------
-        # 完整進出場與移動停利作戰手冊 (Trading Playbook)
+        # 完整進出場與移動停利作戰手冊
         # ----------------------------------------------------------------------
         st.markdown("---")
         st.subheader("📋 操盤手進出場執行作戰手冊")
@@ -484,7 +533,7 @@ with tab_daily:
             st.markdown(f"""
             #### 🔴 三階段階梯式移動停利 (Trailing Stop)
             1. **第一階段（獲利鎖定＋保本）**：
-               * 當股價上漲觸碰 **{tp_1:.2f} 元**（+1.5R 盈虧比），市價賣出 **1/2 部位** 獲利落袋。
+               * 當股價上漲觸碰 **{tp_1:.2f} 元**（+1.5R 盈虧比），市價賣出 **1/2 部位** 獲利落袋（先賺取約 +NT$ {int(dollar_profit_1/2):,} 元）。
                * **關鍵動作**：同時將剩餘 1/2 部位的停損點上調至 **買進成本價 ({entry_price:.2f} 元)**，達成該筆交易「絕對零風險」。
             2. **第二階段（短線主升段移動追蹤）**：
                * 獲利脫離成本超過 15% 後，改以 **10 日均線 (現為 {top['ma10']:.2f} 元)** 作為動態停利線。
@@ -518,36 +567,6 @@ with tab_daily:
                 st.markdown(f"* 🔗 [{nw.get('title', '新聞')}]({nw.get('link', '#')}) — *{nw.get('publisher', '')}*")
 
         # ----------------------------------------------------------------------
-        # LINE 戰報推播按鈕
-        # ----------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("📲 LINE 戰報發送")
-        if st.button("📤 立即將今日選股戰報發送至我的 LINE", type="secondary"):
-            if not line_token or not line_uid:
-                st.warning("⚠️ 側邊欄尚未填入 LINE Channel Access Token 與 User ID，明天有空填入後即可直接使用。")
-            else:
-                line_msg = (
-                    f"📈【台股量化操盤戰報】\n"
-                    f"標的：{top['name']} ({top['sector']})\n"
-                    f"--------------------\n"
-                    f"🎯 現價進場：{entry_price:.2f} 元\n"
-                    f"🛡️ 嚴格停損：{stop_loss_price:.2f} 元 (-{top['risk_pct']:.2f}%)\n"
-                    f"🎯 第一止盈：{tp_1:.2f} 元 (+1.5R)\n"
-                    f"🚀 移動防守：10MA ({top['ma10']:.2f} 元)\n"
-                    f"--------------------\n"
-                    f"💰 建議規模：{lots_to_buy} 張 {odd_shares} 股\n"
-                    f"預計交割款：NT$ {int(total_cost):,} 元\n"
-                    f"最大風險額：NT$ {int(max_risk_amount):,} 元\n"
-                    f"--------------------\n"
-                    f"💡 紀律：達第一目標出1/2保本，其餘沿 10MA/20MA 抱波段！"
-                )
-                success, resp = send_line_push_message(line_token, line_uid, line_msg)
-                if success:
-                    st.success("✅ 戰報已成功發送至您的 LINE！")
-                else:
-                    st.error(f"❌ 發送失敗，錯誤代碼：{resp}")
-
-        # ----------------------------------------------------------------------
         # 視覺化點位走勢圖
         # ----------------------------------------------------------------------
         fig_top = go.Figure(data=[go.Candlestick(
@@ -563,9 +582,9 @@ with tab_daily:
         fig_top.update_layout(height=450, title=f"{top['name']} ({top['sector']}) 走勢與動態移動停利圖", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig_top, use_container_width=True)
 
-# ==============================================================================
+# =========================================================
 # Tab 2：滾動回測與勝率戰報 (系統自我進化引擎)
-# ==============================================================================
+# =========================================================
 with tab_backtest:
     st.header("📈 歷史營業日滾動回測與勝率戰報")
     st.caption("回溯過去 45 個營業日，檢驗系統在實戰中是否有真本事，並針對失敗單進行歸因修正。")
@@ -575,14 +594,14 @@ with tab_backtest:
 
     if st.button("🔄 執行歷史營業日滾動回測與歸因檢討", type="primary"):
         with st.spinner(f"正在對過去 {backtest_days} 個營業日進行逐日選股回測與實戰損益追蹤..."):
-            all_tickers = list(ALL_STOCKS.values())
+            all_tickers = list(CURRENT_STOCKS.values())
             raw_data = st.session_state.get('raw_data', None)
             if raw_data is None:
                 raw_data = yf.download(all_tickers, period="1y", group_by='ticker', threads=True, progress=False)
                 st.session_state['raw_data'] = raw_data
 
             stock_dfs = {}
-            for name, code in ALL_STOCKS.items():
+            for name, code in CURRENT_STOCKS.items():
                 if code in raw_data:
                     df_item = raw_data[code].dropna()
                     if hasattr(df_item.columns, 'levels') and len(df_item.columns.levels) > 1:
@@ -633,7 +652,6 @@ with tab_backtest:
                 exit_date = future_window.index[-1]
                 holding_days = len(future_window)
 
-                # 逐日判定先碰止盈還是先碰止損
                 for f_day, row in future_window.iterrows():
                     if row['Low'] <= stop_l:
                         trade_status = "觸發止損 ❌"
@@ -709,14 +727,14 @@ with tab_backtest:
             else:
                 st.warning("回測區間內無符合高分做多門檻的交易，系統成功發揮空手防守機制！")
 
-# ==============================================================================
-# Tab 3：20 大尖端族群動能總榜
-# ==============================================================================
+# =========================================================
+# Tab 3：20 大族群動能與市場內部寬度榜
+# =========================================================
 with tab_rank:
     st.header("🔥 20 大尖端族群動能熱度與多因子全景榜")
     daily_res = st.session_state.get('daily_results', None)
     if daily_res:
-        filter_sec = st.selectbox("依族群篩選查看", ["全部族群"] + list(SECTOR_MAP.keys()))
+        filter_sec = st.selectbox("依族群篩選查看", ["全部族群"] + list(SECTOR_MAP.keys()) + (["自選觀察族群"] if custom_input else []))
         table_rows = []
         for r in daily_res:
             if filter_sec != "全部族群" and r['sector'] != filter_sec:
@@ -727,6 +745,7 @@ with tab_rank:
                 "綜合分(95)": r['tech_chip_score'],
                 "現價": f"{r['close']:.2f}",
                 "今日漲跌%": f"{r['pct']:+.2f}%",
+                "型態特徵": r['pattern'],
                 "籌碼強度": f"{r['chip_acc']:.2f}",
                 "相對大盤RS%": f"{r['rs_alpha']:+.2f}%",
                 "量比": f"{r['vol_ratio']:.2f}x",
@@ -738,14 +757,17 @@ with tab_rank:
     else:
         st.info("請先至第一分頁點擊『啟動大數據全指標掃描』，數據將在此自動同步呈現。")
 
-# ==============================================================================
+# =========================================================
 # Tab 4：個股深入多維技術診斷
-# ==============================================================================
+# =========================================================
 with tab_detail:
     st.sidebar.title("📈 個股技術分析控制台")
-    selected_sec = st.sidebar.selectbox("快速按族群挑選", list(SECTOR_MAP.keys()), key="d_sec")
-    selected_stock = st.sidebar.selectbox("選擇要分析的標的", list(SECTOR_MAP[selected_sec].keys()), key="d_stk")
-    stock_code = SECTOR_MAP[selected_sec][selected_stock]
+    all_avai_sectors = list(SECTOR_MAP.keys()) + (["自選觀察族群"] if custom_input else [])
+    selected_sec = st.sidebar.selectbox("快速按族群挑選", all_avai_sectors, key="d_sec")
+    
+    sec_stocks = {k: v for k, v in CURRENT_STOCKS.items() if CURRENT_STOCK_TO_SECTOR[k] == selected_sec}
+    selected_stock = st.sidebar.selectbox("選擇要分析的標的", list(sec_stocks.keys()), key="d_stk")
+    stock_code = sec_stocks[selected_stock]
 
     period_map = {"1 個月": "1mo", "3 個月": "3mo", "6 個月": "6mo", "1 年": "1y", "2 年": "2y"}
     selected_period = st.sidebar.selectbox("分析週期", list(period_map.keys()), index=2, key="d_per")
@@ -769,6 +791,8 @@ with tab_detail:
         pct_diff = (p_diff / prev_d['Close']) * 100
 
         st.subheader(f"{selected_stock} 綜合深度技術看板 ｜ 族群：{selected_sec}")
+        st.write(f"🏷️ **即時型態辨識**：`{latest_d['Candle_Pattern']}`")
+
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("最新收盤價", f"{latest_d['Close']:.2f} 元", f"{p_diff:+.2f} ({pct_diff:+.2f}%)")
         c2.metric("單日最高 / 最低", f"{latest_d['High']:.2f} / {latest_d['Low']:.2f}")
@@ -844,9 +868,9 @@ with tab_detail:
                 mime="text/csv"
             )
 
-# ==============================================================================
-# Tab 5：操盤大師實戰守則 (Minervini / Weinstein / 資金管理法典)
-# ==============================================================================
+# =========================================================
+# Tab 5：操盤大師實戰守則 (Minervini / Weinstein / 資金管理)
+# =========================================================
 with tab_manual:
     st.header("📚 頂尖量化操盤大師實戰守則")
     st.markdown("""

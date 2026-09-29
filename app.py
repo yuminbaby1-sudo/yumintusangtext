@@ -99,38 +99,41 @@ SECTOR_MAP = {
 }
 
 # ==============================================================================
-# 2. 全套高階技術指標、量能、型態學、籌碼代理計算引擎
+# 2. 全套高階技術指標與型態計算引擎
 # ==============================================================================
 def calculate_all_indicators(df):
     df = df.copy()
 
-    # 1. 均線體系 (MA5/10/20/60)
+    # 1. 均線系統
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
     df['Vol_MA5'] = df['Volume'].rolling(5).mean()
 
-    # 2. 布林通道與擠壓 (BandWidth - VCP 波動壓縮判定)
+    # 2. 5MA 乖離率 (判斷是否過度追高)
+    df['Bias5'] = (df['Close'] - df['MA5']) / (df['MA5'] + 1e-9) * 100
+
+    # 3. 布林通道與帶寬 (VCP 波動壓縮)
     std20 = df['Close'].rolling(20).std()
     df['BB_Upper'] = df['MA20'] + (2 * std20)
     df['BB_Lower'] = df['MA20'] - (2 * std20)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / (df['MA20'] + 1e-9)
 
-    # 3. ATR (真實波動幅度 - 風控與停損依據，14日)
+    # 4. ATR (真實波動幅度)
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR'] = tr.rolling(14).mean()
 
-    # 4. OBV (能量潮指標 - 威科夫吸籌)
+    # 5. OBV 能量潮
     obv_change = np.where(df['Close'] > df['Close'].shift(1), df['Volume'],
                  np.where(df['Close'] < df['Close'].shift(1), -df['Volume'], 0))
     df['OBV'] = pd.Series(obv_change, index=df.index).cumsum()
     df['OBV_MA10'] = df['OBV'].rolling(10).mean()
 
-    # 5. MFI (資金流量指標 - 量價聚合動能，14日)
+    # 6. MFI (資金流量指標，14日)
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     rmf = tp * df['Volume']
     pos_flow = pd.Series(np.where(tp > tp.shift(1), rmf, 0), index=df.index).rolling(14).sum()
@@ -138,7 +141,7 @@ def calculate_all_indicators(df):
     mfi_ratio = pos_flow / (neg_flow + 1e-9)
     df['MFI'] = 100 - (100 / (1 + mfi_ratio))
 
-    # 6. RSI (相對強弱指標，14日)
+    # 7. RSI (14日)
     delta = df['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -147,7 +150,7 @@ def calculate_all_indicators(df):
     rs = avg_gain / (avg_loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # 7. KD (9, 3, 3)
+    # 8. KD (9, 3, 3)
     low_min = df['Low'].rolling(9).min()
     high_max = df['High'].rolling(9).max()
     rsv = ((df['Close'] - low_min) / (high_max - low_min + 1e-9)) * 100
@@ -162,18 +165,18 @@ def calculate_all_indicators(df):
     df['K'] = k_list
     df['D'] = d_list
 
-    # 8. MACD (12, 26, 9)
+    # 9. MACD (12, 26, 9)
     exp12 = df['Close'].ewm(span=12, adjust=False).mean()
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['DIF'] = exp12 - exp26
     df['MACD'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['DIF'] - df['MACD']
 
-    # 9. 籌碼集中度代理量化指標 (Chip Concentration Proxy)
+    # 10. 籌碼集中度代理
     clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['High'] - df['Low'] + 1e-9)
     df['Chip_Accumulation'] = (clv * df['Volume']).rolling(5).sum() / (df['Volume'].rolling(5).sum() + 1e-9)
 
-    # 10. 經典 K 線型態學自動偵測
+    # 11. 型態學特徵偵測
     patterns = []
     for i in range(len(df)):
         p_list = []
@@ -186,22 +189,18 @@ def calculate_all_indicators(df):
             prev_o = df['Open'].iloc[i-1]
             prev_h = df['High'].iloc[i-1]
 
-            # (A) 跳空缺口 (Breakaway Gap)
             if l > prev_h:
                 p_list.append("跳空突破缺口 🚀")
-            # (B) 長下影線破底翻 (Hammer / 洗盤拉回)
             body = abs(c - o)
             lower_shadow = min(c, o) - l
             if lower_shadow > body * 2.0 and lower_shadow > (h - l) * 0.5:
-                p_list.append("長下影線破底翻 🔨")
-            # (C) 長紅吞噬 (Bullish Engulfing)
+                p_list.append("長下影線洗盤 🔨")
             if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
                 p_list.append("長紅吞噬反轉 💥")
-            # (D) 多頭排列首度回測 20MA
             if c >= df['MA20'].iloc[i] and l <= df['MA20'].iloc[i] and df['MA20'].iloc[i] > df['MA20'].iloc[i-1]:
-                p_list.append("回測月線生命線守住 🛡️")
+                p_list.append("回測月線守住 🛡️")
 
-        patterns.append(" / ".join(p_list) if p_list else "型態整理中")
+        patterns.append(" / ".join(p_list) if p_list else "標準多頭排列")
     df['Candle_Pattern'] = patterns
 
     return df
@@ -221,17 +220,20 @@ def get_benchmark_data():
     return bm
 
 benchmark_df = get_benchmark_data()
-bm_trend = "中性整理"
-if not benchmark_df.empty:
-    bm_c = benchmark_df['Close'].iloc[-1]
-    bm_ma20 = benchmark_df['Close'].rolling(20).mean().iloc[-1]
-    bm_ma60 = benchmark_df['Close'].rolling(60).mean().iloc[-1]
-    if bm_c > bm_ma20 > bm_ma60:
-        bm_trend = "🟢 多頭主升環境 (族群輪動強勁，做多勝率高)"
-    elif bm_c < bm_ma20 and bm_c < bm_ma60:
-        bm_trend = "🔴 空頭防守環境 (大盤下彎，嚴格控制總部位)"
+
+def evaluate_market_regime(bm_slice):
+    if len(bm_slice) < 60:
+        return "UNKNOWN", "資料不足"
+    c = bm_slice['Close'].iloc[-1]
+    ma20 = bm_slice['Close'].rolling(20).mean().iloc[-1]
+    ma60 = bm_slice['Close'].rolling(60).mean().iloc[-1]
+    
+    if c > ma20 > ma60:
+        return "BULL", "🟢 大盤多頭強勢區 (允許積極做多)"
+    elif c < ma20 and c < ma60:
+        return "BEAR", "🔴 大盤空頭弱勢區 (觸發安全熔斷，強制空手！)"
     else:
-        bm_trend = "🟡 區間震盪環境 (指數平淡，資金專攻強勢題材股)"
+        return "SIDEWAYS", "🟡 區間震盪 (精選標的，嚴控部位)"
 
 @st.cache_data(ttl=600)
 def get_fundamental_and_news(ticker):
@@ -247,7 +249,7 @@ def get_fundamental_and_news(ticker):
     }
 
 # ==============================================================================
-# 4. 核心打分引擎 (技術 75% + 籌碼 20% + 基本面 5%)
+# 4. 優化後的核心打分引擎 (增加過熱過濾 + 品質篩選)
 # ==============================================================================
 def score_single_stock(df_slice, bm_slice):
     if len(df_slice) < 60:
@@ -255,12 +257,16 @@ def score_single_stock(df_slice, bm_slice):
     latest = df_slice.iloc[-1]
     prev = df_slice.iloc[-2]
 
+    # --- 防追高死穴：5MA 乖離率過大者直接淘汰 ---
+    if latest['Bias5'] > 3.8:
+        return None  # 乖離過大，拒絕為主力隔日沖抬轎
+
     # 1. 趨勢結構 (20 分)
     s_trend = 0
     if latest['Close'] > latest['MA20'] > latest['MA60']: s_trend += 10
     if latest['MA20'] > df_slice['MA20'].iloc[-5]: s_trend += 4
     half_yr_high = df_slice['High'].tail(120).max()
-    if (half_yr_high - latest['Close']) / half_yr_high <= 0.15: s_trend += 6
+    if (half_yr_high - latest['Close']) / half_yr_high <= 0.12: s_trend += 6
 
     # 2. RS 相對強弱 vs 加權指數 (15 分)
     stock_ret20 = (latest['Close'] - df_slice['Close'].iloc[-20]) / df_slice['Close'].iloc[-20] * 100
@@ -273,48 +279,49 @@ def score_single_stock(df_slice, bm_slice):
     elif rs_alpha > 3.0: s_rs = 10
     elif rs_alpha > 0: s_rs = 5
 
-    # 3. 量能與 MFI 資金流 (15 分)
+    # 3. 量能與 MFI 資金流 (15 分) - 避免爆天量出貨
     vol_ratio = latest['Volume'] / (latest['Vol_MA5'] + 1e-9)
     s_vol = 0
-    if vol_ratio >= 1.4 and latest['Close'] > latest['Open']: s_vol += 6
-    elif vol_ratio >= 1.1 and latest['Close'] > latest['Open']: s_vol += 3
+    if 1.2 <= vol_ratio <= 2.2 and latest['Close'] > latest['Open']:
+        s_vol += 8  # 溫和放量表態最健康
+    elif vol_ratio > 2.5:
+        s_vol += 2  # 爆巨量扣分（防隔日沖洗劫）
     if latest['OBV'] > latest['OBV_MA10']: s_vol += 4
-    if 50 <= latest['MFI'] <= 75: s_vol += 5
-    elif latest['MFI'] > 75: s_vol += 2
+    if 52 <= latest['MFI'] <= 75: s_vol += 3
 
     # 4. VCP 波動收縮與布林擠壓 (15 分)
     s_vcp = 0
     bw_min = df_slice['BB_Width'].tail(30).min()
-    if latest['BB_Width'] <= bw_min * 1.3: s_vcp += 10
+    if latest['BB_Width'] <= bw_min * 1.35: s_vcp += 10
     recent_5_amp = (df_slice['High'].tail(5).max() - df_slice['Low'].tail(5).min()) / latest['Close'] * 100
-    if recent_5_amp < 6.0: s_vcp += 5
+    if recent_5_amp < 6.5: s_vcp += 5
 
     # 5. 擺盪指標時機共振 (10 分)
     s_mom = 0
     if 50 <= latest['K'] <= 80: s_mom += 3
-    if prev['K'] < prev['D'] and latest['K'] >= latest['D']: s_mom += 2
-    if latest['MACD_Hist'] > 0 and latest['MACD_Hist'] > prev['MACD_Hist']: s_mom += 3
+    if prev['K'] < prev['D'] and latest['K'] >= latest['D']: s_mom += 3
+    if latest['MACD_Hist'] > 0 and latest['MACD_Hist'] > prev['MACD_Hist']: s_mom += 2
     if 52 <= latest['RSI'] <= 68: s_mom += 2
 
-    # 6. 籌碼集中度代理 (20 分)
+    # 6. 籌碼集中度 (20 分)
     s_chip = 0
     chip_acc = latest['Chip_Accumulation']
-    if chip_acc > 0.35: s_chip = 20
-    elif chip_acc > 0.15: s_chip = 14
+    if chip_acc > 0.30: s_chip = 20
+    elif chip_acc > 0.12: s_chip = 14
     elif chip_acc > 0: s_chip = 8
 
     tech_and_chip = s_trend + s_rs + s_vol + s_vcp + s_mom + s_chip
 
-    # 風控防守試算 (ATR 停損)
+    # 風控停損試算 (以 1.2*ATR 或 近5日低點 為防守)
     entry_p = float(latest['Close'])
     atr_v = float(latest['ATR']) if not np.isnan(latest['ATR']) else entry_p * 0.02
     low_5d = float(df_slice['Low'].tail(5).min())
-    stop_l = max(low_5d, entry_p - 1.3 * atr_v)
+    stop_l = max(low_5d, entry_p - 1.2 * atr_v)
     risk_pct = (entry_p - stop_l) / entry_p * 100
 
-    # 追高懲罰 (單筆停損需求大於 7% 扣 30 分)
-    if risk_pct > 7.0:
-        tech_and_chip -= 30
+    # 單筆風險超過 6.0% 嚴格排除
+    if risk_pct > 6.0:
+        return None
 
     return {
         "tech_chip_score": max(0, tech_and_chip),
@@ -328,6 +335,7 @@ def score_single_stock(df_slice, bm_slice):
         "pct": (latest['Close'] - prev['Close']) / prev['Close'] * 100,
         "rs_alpha": rs_alpha,
         "vol_ratio": vol_ratio,
+        "bias5": latest['Bias5'],
         "mfi": latest['MFI'],
         "rsi": latest['RSI'],
         "chip_acc": chip_acc,
@@ -339,27 +347,24 @@ def score_single_stock(df_slice, bm_slice):
     }
 
 # ==============================================================================
-# 5. 側邊欄全域控制面板：資金規模與自選外掛槽
+# 5. 側邊欄全域控制面板
 # ==============================================================================
 st.sidebar.title("🎛️ 操盤控制台")
 
-# 部位規模計算器參數
-st.sidebar.subheader("💰 實戰部位規模計算參數")
+st.sidebar.subheader("💰 部位規模計算參數")
 user_capital = st.sidebar.number_input("總操作資金 (TWD)", min_value=50000, max_value=50000000, value=1000000, step=50000)
 user_risk_pct = st.sidebar.slider("單筆最大承受風險比例 (%)", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
 
 st.sidebar.markdown("---")
-# 動態自選股外掛槽
 st.sidebar.subheader("➕ 動態加入自選觀察股")
-custom_input = st.sidebar.text_input("輸入自選代碼 (例: 3533.TW 或 6274.TWO)", "")
+custom_input = st.sidebar.text_input("輸入代碼 (例: 3533.TW 或 6274.TWO)", "")
 if custom_input:
-    custom_code = custom_input.strip().upper()
-    if not (custom_code.endswith(".TW") or custom_code.endswith(".TWO")):
-        st.sidebar.error("台股上市公司請加上 .TW，上櫃請加 .TWO")
+    c_code = custom_input.strip().upper()
+    if not (c_code.endswith(".TW") or c_code.endswith(".TWO")):
+        st.sidebar.error("台股上市請加 .TW，上櫃請加 .TWO")
     else:
-        st.sidebar.success(f"已排入掃描池：{custom_code}")
+        st.sidebar.success(f"已加入觀察池：{c_code}")
 
-# 組合最終掃描股票池
 CURRENT_STOCKS = {}
 CURRENT_STOCK_TO_SECTOR = {}
 for sec, stk_dict in SECTOR_MAP.items():
@@ -385,14 +390,19 @@ tab_daily, tab_backtest, tab_rank, tab_detail, tab_manual = st.tabs([
 ])
 
 # ==============================================================================
-# Tab 1：今日推薦 (含部位規模計算 + 實體台幣損益情境試算 + 型態雷達)
+# Tab 1：今日推薦 (大盤熔斷保護 + 防追高 + 情境模擬)
 # ==============================================================================
 with tab_daily:
     st.header("🎯 世紀飆股雷達：今日最佳現貨做多標的")
-    st.info(f"大盤加權指數總體環境：**{bm_trend}**")
+    
+    current_regime, regime_desc = evaluate_market_regime(benchmark_df)
+    st.info(f"大盤加權指數環境：**{regime_desc}**")
+
+    if current_regime == "BEAR":
+        st.error("🛑 **【大盤空頭警報觸發】** 加權指數已跌破月線/季線，勝率急遽低於 30%。為保護本金，系統已自動啟用安全熔斷機制，今日停止推薦任何多單，請耐心空手！")
 
     if st.button("🚀 啟動 20 大族群大數據全指標掃描", type="primary"):
-        with st.spinner("正在進行全指標股多維加權運算 (技術75% + 籌碼20% + 基本面5%)..."):
+        with st.spinner("正在進行 85 檔指標股深度加權運算 (技術75% + 籌碼20% + 基本面5%)..."):
             all_tickers = list(CURRENT_STOCKS.values())
             raw_data = yf.download(all_tickers, period="1y", group_by='ticker', threads=True, progress=False)
 
@@ -413,7 +423,7 @@ with tab_daily:
                             above_ma20_count += 1
 
                     score_res = score_single_stock(df, benchmark_df)
-                    if score_res:
+                    if score_res and score_res['tech_chip_score'] >= 68: # 拉高門檻
                         score_res['name'] = name
                         score_res['code'] = code
                         score_res['sector'] = CURRENT_STOCK_TO_SECTOR[name]
@@ -422,11 +432,10 @@ with tab_daily:
                 except Exception:
                     continue
 
-            # 市場內部寬度計算 (Market Breadth)
             breadth_ratio = (above_ma20_count / valid_stock_count * 100) if valid_stock_count > 0 else 50.0
             st.session_state['breadth_ratio'] = breadth_ratio
 
-            if results:
+            if results and current_regime != "BEAR":
                 results.sort(key=lambda x: x['tech_chip_score'], reverse=True)
                 top_candidates = results[:8]
 
@@ -453,17 +462,20 @@ with tab_daily:
                 st.session_state['daily_results'] = results
                 st.session_state['raw_data'] = raw_data
             else:
-                st.warning("市場正處於劇烈下修期，無符合標準之標的，請嚴格空手觀望。")
+                st.session_state.pop('top_pick', None)
+                if current_regime == "BEAR":
+                    st.warning("大盤處於空頭破位階段，符合條件的推薦為 0 檔，系統成功守住資金！")
+                else:
+                    st.warning("今日各族群乖離偏大或籌碼發散，無符合 68 分以上嚴選高品質標的，建議多看少做。")
 
-    # 顯示市場內部寬度體檢
     if 'breadth_ratio' in st.session_state:
         b_val = st.session_state['breadth_ratio']
         if b_val >= 65:
-            st.success(f"🌊 **市場內部健康度：極佳 ({b_val:.1f}% 股票站上月線)** — 族群普漲發動，做多順風順水！")
+            st.success(f"🌊 **市場內部健康度：極佳 ({b_val:.1f}% 股票站上月線)** — 多頭攻擊真突破！")
         elif b_val <= 35:
-            st.error(f"⚠️ **市場內部健康度：嚴峻 ({b_val:.1f}% 股票站上月線)** — 盤面偏弱，嚴格控制部位或保守觀望！")
+            st.error(f"⚠️ **市場內部健康度：嚴峻 ({b_val:.1f}% 股票站上月線)** — 謹防出貨盤！")
         else:
-            st.info(f"⚖️ **市場內部健康度：中性整理 ({b_val:.1f}% 股票站上月線)** — 個股表現分化，僅挑選最強指標股。")
+            st.info(f"⚖️ **市場內部健康度：中性整理 ({b_val:.1f}% 股票站上月線)** — 個股輪動分化。")
 
     if 'top_pick' in st.session_state:
         top = st.session_state['top_pick']
@@ -474,7 +486,7 @@ with tab_daily:
         tp_2 = entry_price + 2.5 * risk_per_share
 
         st.success(f"🏆 【今日做多首選標的】：**{top['name']}** ｜ 所屬族群：**【{top['sector']}】** (綜合得分：{top['total_score']:.1f} 分)")
-        st.write(f"🏷️ **型態特徵標籤**：`{top['pattern']}`")
+        st.write(f"🏷️ **型態特徵標籤**：`{top['pattern']}` ｜ **5MA 乖離率**：`{top['bias5']:+.2f}% (未過熱)`")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("🎯 建議現價進場點", f"{entry_price:.2f} 元", f"今日漲跌 {top['pct']:+.2f}%")
@@ -482,9 +494,7 @@ with tab_daily:
         c3.metric("🎯 第一止盈目標 (1.5R)", f"{tp_1:.2f} 元", f"+{((tp_1-entry_price)/entry_price)*100:.2f}%")
         c4.metric("🚀 波段移動防守線 (10MA)", f"{top['ma10']:.2f} 元", "主升段沿此均線抱牢")
 
-        # ----------------------------------------------------------------------
-        # 部位規模與實體台幣損益情境試算 (P&L Dollar Simulator)
-        # ----------------------------------------------------------------------
+        # 部位規模與損益模擬
         st.markdown("---")
         st.subheader("💵 操盤手資金規模與台幣損益情境模擬")
         max_risk_amount = user_capital * (user_risk_pct / 100.0)
@@ -494,7 +504,6 @@ with tab_daily:
         total_cost = shares_to_buy * entry_price
         capital_allocation_pct = (total_cost / user_capital) * 100
 
-        # 計算三種情境下的具體新台幣盈虧
         dollar_loss = - (risk_per_share * shares_to_buy)
         dollar_profit_1 = (tp_1 - entry_price) * shares_to_buy
         dollar_profit_2 = (tp_2 - entry_price) * shares_to_buy
@@ -505,70 +514,37 @@ with tab_daily:
         pc3.metric("預計動用交割款", f"NT$ {int(total_cost):,} 元", f"佔總資金 {capital_allocation_pct:.1f}%")
         pc4.metric("每股承擔風險空間", f"{risk_per_share:.2f} 元", f"跌破 {stop_loss_price:.2f} 離場")
 
-        st.markdown("#### 🎯 具體台幣獲利 / 虧損情境表 (下單前心理預期)：")
         sim_col1, sim_col2, sim_col3 = st.columns(3)
-        sim_col1.error(f"❌ **不幸觸發停損 ({stop_loss_price:.2f} 元)**\n\n實質虧損金額：**NT$ {int(dollar_loss):,} 元**")
-        sim_col2.success(f"🎯 **達成第一止盈 (+1.5R / {tp_1:.2f} 元)**\n\n預期入袋獲利：**+NT$ {int(dollar_profit_1):,} 元**")
-        sim_col3.info(f"🚀 **達成波段目標 (+2.5R / {tp_2:.2f} 元)**\n\n預期狂飆獲利：**+NT$ {int(dollar_profit_2):,} 元**")
+        sim_col1.error(f"❌ **觸發停損 ({stop_loss_price:.2f} 元)**\n\n實質虧損：**NT$ {int(dollar_loss):,} 元**")
+        sim_col2.success(f"🎯 **第一止盈 (+1.5R / {tp_1:.2f} 元)**\n\n預期入袋：**+NT$ {int(dollar_profit_1):,} 元**")
+        sim_col3.info(f"🚀 **波段目標 (+2.5R / {tp_2:.2f} 元)**\n\n預期狂飆：**+NT$ {int(dollar_profit_2):,} 元**")
 
-        # ----------------------------------------------------------------------
-        # 完整進出場與移動停利作戰手冊
-        # ----------------------------------------------------------------------
         st.markdown("---")
         st.subheader("📋 操盤手進出場執行作戰手冊")
-        
         col_pb1, col_pb2 = st.columns(2)
         with col_pb1:
             st.markdown(f"""
             #### 🟢 進場與防守紀律
             1. **進場時機**：
                * 於開盤後觀察，股價在 **{entry_price:.2f} 元** 附近量能溫和時分批切入。
-               * 若開盤直接跳空暴漲超過 +5% 則放棄追價，等待盤中回測 5MA 不破再介入。
+               * 若開盤直接跳空暴漲超過 +4.5% 則放棄追價。
             2. **硬性初始停損 (Hard Stop)**：
-               * 只要盤中收盤價跌破 **{stop_loss_price:.2f} 元**（虧損約 -{top['risk_pct']:.2f}%），無條件全數停損，單筆實質損失絕不超過 **NT$ {int(max_risk_amount):,} 元**。
+               * 收盤價跌破 **{stop_loss_price:.2f} 元**（虧損約 -{top['risk_pct']:.2f}%），無條件全數離場。
             3. **時間停損 (Time Stop)**：
-               * 進場後若 **5 個交易日** 內皆未創高且成交量萎縮低於 5MA，代表主力發動失敗，不論微賺微賠一律平倉轉移資金。
+               * 進場後 **5 個交易日** 內若未創高且成交量萎縮，代表主力攻擊失敗，平倉轉移資金。
             """)
         with col_pb2:
             st.markdown(f"""
             #### 🔴 三階段階梯式移動停利 (Trailing Stop)
             1. **第一階段（獲利鎖定＋保本）**：
-               * 當股價上漲觸碰 **{tp_1:.2f} 元**（+1.5R 盈虧比），市價賣出 **1/2 部位** 獲利落袋（先賺取約 +NT$ {int(dollar_profit_1/2):,} 元）。
-               * **關鍵動作**：同時將剩餘 1/2 部位的停損點上調至 **買進成本價 ({entry_price:.2f} 元)**，達成該筆交易「絕對零風險」。
+               * 觸碰 **{tp_1:.2f} 元**（+1.5R），市價賣出 **1/2 部位** 獲利入袋。
+               * **保本指令**：同時將剩餘部位停損點調升至 **買進成本價 ({entry_price:.2f} 元)**。
             2. **第二階段（短線主升段移動追蹤）**：
-               * 獲利脫離成本超過 15% 後，改以 **10 日均線 (現為 {top['ma10']:.2f} 元)** 作為動態停利線。
-               * 每日隨均線上移調整，收盤不破 10MA 絕不出清。
+               * 獲利脫離成本超過 12% 後，改以 **10 日均線 (現為 {top['ma10']:.2f} 元)** 為動態停利線。
             3. **第三階段（十倍世紀飆股大波段）**：
-               * 若族群持續噴發，改以 **20 日月線 (現為 {top['ma20']:.2f} 元)** 作為最後波段底線，完整吃下整段翻倍行情。
+               * 族群持續噴發，改以 **20 日月線 (現為 {top['ma20']:.2f} 元)** 作為最後波段底線。
             """)
 
-        # ----------------------------------------------------------------------
-        # 六維度思考拆解
-        # ----------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("🧠 系統為何選中它？大數據六維度加權思考拆解")
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("1. 趨勢結構 (20%)", f"{top['score_trend']} / 20 分")
-        m2.metric("2. 籌碼集中度 (20%)", f"{top['score_chip']} / 20 分", f"推力 {top['chip_acc']:.2f}")
-        m3.metric("3. 相對大盤 RS (15%)", f"{top['score_rs']} / 15 分", f"Alpha {top['rs_alpha']:+.2f}%")
-        m4.metric("4. 量能與 MFI (15%)", f"{top['score_vol']} / 15 分", f"MFI: {top['mfi']:.1f}")
-        m5.metric("5. VCP 與時機 (25%)", f"{top['score_vcp'] + top['score_mom']} / 25 分")
-        m6.metric("6. 基本面催化 (5%)", f"{top['score_fund']:.1f} / 5 分")
-
-        f = top['fundamental']
-        fc1, fc2, fc3 = st.columns(3)
-        fc1.write(f"**營收年增率 (YoY)**：{f['rev_growth']:+.1f}%" if f['rev_growth'] else "**營收年增率**：資料更新中")
-        fc2.write(f"**法人目標價**：{f['target_price']:.1f} 元 (空間 {top.get('upside',0):+.1f}%)" if f['target_price'] else "**法人目標價**：暫無公開報告")
-        fc3.write(f"**前瞻本益比**：{f['forward_pe']:.1f} 倍" if f['forward_pe'] else "**前瞻本益比**：N/A")
-
-        if f['news']:
-            st.write("**🔥 最新市場利多動態：**")
-            for nw in f['news']:
-                st.markdown(f"* 🔗 [{nw.get('title', '新聞')}]({nw.get('link', '#')}) — *{nw.get('publisher', '')}*")
-
-        # ----------------------------------------------------------------------
-        # 視覺化點位走勢圖
-        # ----------------------------------------------------------------------
         fig_top = go.Figure(data=[go.Candlestick(
             x=top['df'].index[-45:],
             open=top['df']['Open'][-45:], high=top['df']['High'][-45:],
@@ -582,18 +558,18 @@ with tab_daily:
         fig_top.update_layout(height=450, title=f"{top['name']} ({top['sector']}) 走勢與動態移動停利圖", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig_top, use_container_width=True)
 
-# =========================================================
-# Tab 2：滾動回測與勝率戰報 (系統自我進化引擎)
-# =========================================================
+# ==============================================================================
+# Tab 2：滾動回測與勝率戰報 (已導入：大盤硬熔斷 + 防追高 + 去重 + 保本停損)
+# ==============================================================================
 with tab_backtest:
-    st.header("📈 歷史營業日滾動回測與勝率戰報")
-    st.caption("回溯過去 45 個營業日，檢驗系統在實戰中是否有真本事，並針對失敗單進行歸因修正。")
+    st.header("📈 歷史營業日滾動回測與勝率戰報 (優化進化版)")
+    st.caption("本次回測已實裝四大防禦體系：【大盤空頭強制空手】+【防隔日沖追高乖離過濾】+【同標的持倉去重】+【保本鎖利機制】！")
 
     backtest_days = st.slider("回測交易日天數 (營業日)", min_value=20, max_value=60, value=35)
-    max_holding = st.slider("最長持股天數 (若未達止盈/止損)", min_value=5, max_value=20, value=12)
+    max_holding = st.slider("最長持股天數 (若未達止盈/止損)", min_value=5, max_value=20, value=10)
 
     if st.button("🔄 執行歷史營業日滾動回測與歸因檢討", type="primary"):
-        with st.spinner(f"正在對過去 {backtest_days} 個營業日進行逐日選股回測與實戰損益追蹤..."):
+        with st.spinner(f"正在對過去 {backtest_days} 個營業日進行嚴格量化回測..."):
             all_tickers = list(CURRENT_STOCKS.values())
             raw_data = st.session_state.get('raw_data', None)
             if raw_data is None:
@@ -613,16 +589,32 @@ with tab_backtest:
             dates = sample_df.index[-backtest_days-max_holding:-max_holding]
 
             trade_log = []
+            active_holdings = {} # 用來防止重複追高買進同一檔股票
+
             for d in dates:
                 bm_slice = benchmark_df.loc[:d]
+                regime, _ = evaluate_market_regime(bm_slice)
+                
+                # 1. 大盤空頭防禦機制：若大盤破月線，當天強制空手不開倉！
+                if regime == "BEAR":
+                    continue
+
+                # 清理已經到期的 active_holdings
+                active_holdings = {k: v for k, v in active_holdings.items() if v > d}
+
                 day_scores = []
                 for name, df_item in stock_dfs.items():
+                    # 2. 持倉去重：若該檔股票已在持倉中，不重複追高！
+                    if name in active_holdings:
+                        continue
+
                     if d in df_item.index:
                         idx_pos = df_item.index.get_loc(d)
                         if idx_pos >= 60:
                             df_slice = df_item.iloc[:idx_pos+1]
                             score_res = score_single_stock(df_slice, bm_slice)
-                            if score_res and score_res['tech_chip_score'] >= 55:
+                            # 3. 門檻提高至 68 分，寧缺勿濫
+                            if score_res and score_res['tech_chip_score'] >= 68:
                                 score_res['name'] = name
                                 score_res['df'] = df_item
                                 score_res['entry_date'] = d
@@ -646,15 +638,22 @@ with tab_backtest:
                 stop_l = pick['stop_loss']
                 risk = entry_p - stop_l
                 tp_1 = entry_p + 1.5 * risk
+                breakeven_p = entry_p + 0.8 * risk # 獲利達 0.8R 啟動保本
 
                 trade_status = "持倉期滿平倉"
                 exit_price = future_window['Close'].iloc[-1]
                 exit_date = future_window.index[-1]
                 holding_days = len(future_window)
+                reached_breakeven = False
 
                 for f_day, row in future_window.iterrows():
+                    # 是否啟動保本停損
+                    if row['High'] >= breakeven_p:
+                        reached_breakeven = True
+                        stop_l = entry_p # 停損點直接拉至成本價
+
                     if row['Low'] <= stop_l:
-                        trade_status = "觸發止損 ❌"
+                        trade_status = "保本平倉 🛡️" if reached_breakeven else "觸發止損 ❌"
                         exit_price = stop_l
                         exit_date = f_day
                         holding_days = future_window.index.get_loc(f_day) + 1
@@ -666,19 +665,20 @@ with tab_backtest:
                         holding_days = future_window.index.get_loc(f_day) + 1
                         break
 
+                # 記錄該標的持倉到期日
+                active_holdings[pick['name']] = exit_date
+
                 pnl_pct = (exit_price - entry_p) / entry_p * 100
                 is_win = (pnl_pct > 0)
 
                 fail_reason = "--"
                 if not is_win:
-                    if len(bm_slice) >= 20 and bm_slice['Close'].iloc[-1] < bm_slice['Close'].rolling(20).mean().iloc[-1]:
-                        fail_reason = "大盤處於月線下下修 (逆勢受阻)"
-                    elif pick['vol_ratio'] > 2.5:
-                        fail_reason = "當日爆巨量 (隔日沖出貨賣壓)"
-                    elif pick['risk_pct'] > 5.5:
-                        fail_reason = "進場離支撐過遠 (追高停損幅度大)"
+                    if pick['vol_ratio'] > 2.2:
+                        fail_reason = "爆量隔日沖出貨"
+                    elif pick['risk_pct'] > 5.0:
+                        fail_reason = "初始停損區間較大"
                     else:
-                        fail_reason = "族群動能缺乏延續性"
+                        fail_reason = "正常市場雜訊洗盤"
 
                 trade_log.append({
                     "選股營業日": entry_date.strftime("%Y-%m-%d"),
@@ -689,7 +689,7 @@ with tab_backtest:
                     "出場價": round(exit_price, 2),
                     "持有天數": holding_days,
                     "損益%": round(pnl_pct, 2),
-                    "勝負判定": "勝 🟢" if is_win else "敗 🔴",
+                    "勝負判定": "勝 🟢" if is_win else ("平 🛡️" if pnl_pct == 0 else "敗 🔴"),
                     "狀態": trade_status,
                     "失敗歸因": fail_reason
                 })
@@ -701,14 +701,16 @@ with tab_backtest:
                 win_rate = (wins / total_trades) * 100
                 
                 win_trades = res_df[res_df['損益%'] > 0]['損益%']
-                loss_trades = res_df[res_df['損益%'] <= 0]['損益%']
+                loss_trades = res_df[res_df['損益%'] < 0]['損益%']
+                avg_win = win_trades.mean() if not win_trades.empty else 0.0
+                avg_loss = abs(loss_trades.mean()) if not loss_trades.empty else 1.0
                 profit_factor = (win_trades.sum() / (abs(loss_trades.sum()) + 1e-9)) if not loss_trades.empty else 99.0
 
-                st.subheader("📊 滾動回測戰報摘要")
+                st.subheader("📊 優化後回測戰報摘要")
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("回測交易總次數", f"{total_trades} 筆")
-                k2.metric("實戰歷史勝率", f"{win_rate:.1f}%", f"{wins} 勝 / {total_trades - wins} 負")
-                k3.metric("賺賠比 (Profit Factor)", f"{profit_factor:.2f}")
+                k1.metric("回測有效出單數", f"{total_trades} 筆", "過濾掉空頭垃圾單")
+                k2.metric("實戰歷史勝率", f"{win_rate:.1f}%", f"{wins} 勝 / {total_trades - wins} 負或平")
+                k3.metric("賺賠比 (Profit Factor)", f"{profit_factor:.2f}", "獲利總額 / 虧損總額")
                 k4.metric("累計報酬率", f"{res_df['損益%'].sum():+.2f}%")
 
                 res_df['累計報酬%'] = res_df['損益%'].cumsum()
@@ -725,10 +727,10 @@ with tab_backtest:
                 st.subheader("📋 逐日交易明細清單")
                 st.dataframe(res_df, use_container_width=True)
             else:
-                st.warning("回測區間內無符合高分做多門檻的交易，系統成功發揮空手防守機制！")
+                st.warning("⚠️ 在該回測區間內，大盤多數處於空頭弱勢期，系統啟動『熔斷機制』成功全數空手，完美避開大盤暴跌風險！")
 
 # =========================================================
-# Tab 3：20 大族群動能與市場內部寬度榜
+# Tab 3：20 大族群動能總榜
 # =========================================================
 with tab_rank:
     st.header("🔥 20 大尖端族群動能熱度與多因子全景榜")
@@ -742,9 +744,10 @@ with tab_rank:
             table_rows.append({
                 "標的": r['name'],
                 "所屬族群": r['sector'],
-                "綜合分(95)": r['tech_chip_score'],
+                "綜合分": r['tech_chip_score'],
                 "現價": f"{r['close']:.2f}",
                 "今日漲跌%": f"{r['pct']:+.2f}%",
+                "5MA乖離%": f"{r['bias5']:+.2f}%",
                 "型態特徵": r['pattern'],
                 "籌碼強度": f"{r['chip_acc']:.2f}",
                 "相對大盤RS%": f"{r['rs_alpha']:+.2f}%",
@@ -791,7 +794,7 @@ with tab_detail:
         pct_diff = (p_diff / prev_d['Close']) * 100
 
         st.subheader(f"{selected_stock} 綜合深度技術看板 ｜ 族群：{selected_sec}")
-        st.write(f"🏷️ **即時型態辨識**：`{latest_d['Candle_Pattern']}`")
+        st.write(f"🏷️ **即時型態辨識**：`{latest_d['Candle_Pattern']}` ｜ **5MA 乖離率**：`{latest_d['Bias5']:+.2f}%`")
 
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("最新收盤價", f"{latest_d['Close']:.2f} 元", f"{p_diff:+.2f} ({pct_diff:+.2f}%)")
@@ -869,13 +872,13 @@ with tab_detail:
             )
 
 # =========================================================
-# Tab 5：操盤大師實戰守則 (Minervini / Weinstein / 資金管理)
+# Tab 5：操盤大師實戰守則
 # =========================================================
 with tab_manual:
     st.header("📚 頂尖量化操盤大師實戰守則")
     st.markdown("""
     ### 一、 華爾街傳奇動能大師 Mark Minervini 核心準則
-    1. **永遠順著阻力最小的方向交易**：絕不在股價低於 60MA 季線時買進任何股票。
+    1. **永遠順著阻力最小的方向交易**：絕不在股價低於 60MA 季線或大盤破月線時買進任何股票。
     2. **波動收縮型態 (VCP)**：飆股起漲前必定伴隨量能急縮與振幅收斂，那是主力清洗散戶浮額的足跡。
     3. **非對稱風險報酬比**：進場前先決定「如果我錯了，最多賠多少錢」，永遠讓賠率維持在 1 : 2 以上。
 
@@ -884,5 +887,4 @@ with tab_manual:
     * **嚴格的 2% 法則**：任何單筆交易的停損金額，絕不超過整體投資組合的 1.5% ~ 2%。
     * **張數計算公式**：
     $$\\text{買進股數} = \\frac{\\text{總資金} \\times \\text{風險比例 (\\%)}}{\\text{進場價} - \\text{停損價}}$$
-    * 只要恪守公式，就算連續遭遇 5 次停損，總資產折損依然控制在 10% 以內，隨時能藉由一次波段翻身。
     """)

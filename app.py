@@ -1413,7 +1413,8 @@ with tab_sec:
     all_tags = sorted({t for v in SECTORS.values() for _, _, ts in v for t in ts})
     tag_pick = c_b.selectbox("概念標籤（選了會覆蓋族群）", ["—"] + all_tags)
     items = ([(c, n, t) for v in SECTORS.values() for c, n, t in v if tag_pick in t] if tag_pick != "—" else SECTORS[sec])
-    seen, items = set(), [i for i in items if not (i[0] in seen or seen.add(i[0]))]
+    seen = set()
+    items = [i for i in items if not (i[0] in seen or seen.add(i[0]))]
     need = [c for c, _, _ in items if c not in eng.codes]
     sec_px = cached_prices(tuple(f"{c}.{MARKET.get(c, 'TW')}" for c in need)) if need else {}
     for i in range(0, len(items), 2):

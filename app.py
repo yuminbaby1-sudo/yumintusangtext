@@ -1,5 +1,5 @@
 """
-台股量化操盤決策系統 v3（完整功能旗艦版）
+台股量化操盤決策系統 v3.1（零執行緒安全防禦 ＆ 完整功能旗艦版）
 執行：pip install streamlit yfinance pandas numpy plotly requests lxml html5lib beautifulsoup4 tzdata
      streamlit run tw_quant_app.py
      （背景推播模式）python tw_quant_app.py --daemon
@@ -15,6 +15,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from itertools import product
@@ -28,10 +29,10 @@ import requests
 import streamlit as st
 
 # ============================================================================
-# A. 資料來源層（修復 Thread 限制與連線健全度）
+# A. 資料來源層（純同步零執行緒安全連線）
 # ============================================================================
 TZ = ZoneInfo("Asia/Taipei")
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
 
 try:
     requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
@@ -43,7 +44,7 @@ def now_tw() -> dt.datetime:
     return dt.datetime.now(TZ)
 
 
-def _get(url: str, params: dict | None = None, timeout: int = 20) -> requests.Response:
+def _get(url: str, params: dict | None = None, timeout: int = 15) -> requests.Response:
     last = None
     for verify in (True, False):
         try:
@@ -108,9 +109,9 @@ def load_daily_turnover():
         js = _get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL").json()
         for r in js:
             out[str(r.get("Code", "")).strip()] = _num(r.get("TradeValue"))
-        msgs.append(f"上市當日成交值：{len(js)} 檔")
+        msgs.append(f"上市成交值：{len(js)} 檔")
     except Exception as e:
-        msgs.append(f"上市當日成交值抓取失敗：{e}")
+        msgs.append(f"上市成交值抓取失敗：{e}")
     try:
         js = _get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes").json()
         n = 0
@@ -120,18 +121,18 @@ def load_daily_turnover():
             if ck and ak:
                 out[str(r[ck]).strip()] = _num(r[ak])
                 n += 1
-        msgs.append(f"上櫃當日成交值：{n} 檔")
+        msgs.append(f"上櫃成交值：{n} 檔")
     except Exception as e:
-        msgs.append(f"上櫃當日成交值抓取失敗：{e}")
+        msgs.append(f"上櫃成交值抓取失敗：{e}")
     return pd.Series(out, dtype=float).dropna(), msgs
 
 
 def load_institutional(n_days: int = 5):
-    """三大法人近 n 個交易日買賣超（鎖定真正的主力作手：投信與波段外資）"""
+    """三大法人近 n 日累計（主力核心：投信連續買盤與外資動向）"""
     msgs, frames, used = [], [], []
     day = now_tw().date()
     attempts = 0
-    while len(used) < n_days and attempts < 14:
+    while len(used) < n_days and attempts < 12:
         attempts += 1
         if day.weekday() < 5:
             try:
@@ -147,15 +148,14 @@ def load_institutional(n_days: int = 5):
                                        for r in js["data"]], columns=["code", "foreign", "trust", "total"])
                     frames.append(df)
                     used.append(day)
-                time.sleep(0.3)
-            except Exception as e:
-                msgs.append(f"T86 {day} 失敗：{e}")
+                time.sleep(0.2)
+            except Exception:
+                pass
         day -= dt.timedelta(days=1)
     if not frames:
-        msgs.append("三大法人資料抓取失敗，籌碼欄位將顯示『無資料』。")
-        return pd.DataFrame(columns=["foreign", "trust", "total"]), [], msgs
+        return pd.DataFrame(columns=["foreign", "trust", "total"]), [], ["三大法人資料抓取中斷"]
     out = pd.concat(frames).groupby("code")[["foreign", "trust", "total"]].sum()
-    msgs.append(f"三大法人主力籌碼（上市）：{len(used)} 個交易日累計")
+    msgs.append(f"法人主力籌碼：累計近 {len(used)} 個交易日")
     return out, used, msgs
 
 
@@ -173,9 +173,9 @@ def load_revenue_yoy():
                 if ck and yk:
                     out[str(r[ck]).strip()] = _num(r[yk])
                     n += 1
-            msgs.append(f"月營收 YoY：{n} 檔（{'上市' if 'twse' in u else '上櫃'}）")
-        except Exception as e:
-            msgs.append(f"月營收抓取失敗：{e}")
+            msgs.append(f"營收 YoY：{n} 檔")
+        except Exception:
+            pass
     return pd.Series(out, dtype=float), msgs
 
 
@@ -189,44 +189,63 @@ def load_flags():
                 if ck:
                     bucket.add(str(r[ck]).strip())
             msgs.append(f"{name}：{len(bucket)} 檔")
-        except Exception as e:
-            msgs.append(f"{name}抓取失敗：{e}")
+        except Exception:
+            pass
     return punish, notice, msgs
 
 
-def download_prices(tickers: list[str], period: str = "3y", chunk: int = 40, min_len: int = 90) -> dict:
-    """下載歷史價格；強制關閉 threads，解決 Streamlit Cloud 執行緒耗盡崩潰"""
-    import yfinance as yf
+# ----------------------------------------------------------------------------
+# 核心升級：零執行緒 原生 Yahoo Finance HTTP 下載器（徹底杜絕 thread limit 崩潰）
+# ----------------------------------------------------------------------------
+def _fetch_yahoo_chart_single(ticker: str, session: requests.Session, range_str: str = "2y") -> pd.DataFrame | None:
+    enc_ticker = urllib.parse.quote(ticker)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{enc_ticker}"
+    params = {"range": range_str, "interval": "1d"}
+    try:
+        r = session.get(url, params=params, headers=UA, timeout=10)
+        if r.status_code != 200:
+            return None
+        js = r.json()
+        res = js.get("chart", {}).get("result")
+        if not res:
+            return None
+        res0 = res[0]
+        timestamps = res0.get("timestamp", [])
+        indicators = res0.get("indicators", {})
+        quotes = indicators.get("quote", [{}])[0]
+        adjclose = indicators.get("adjclose", [{}])[0].get("adjclose", [])
 
+        opens = quotes.get("open", [])
+        highs = quotes.get("high", [])
+        lows = quotes.get("low", [])
+        closes = adjclose if adjclose else quotes.get("close", [])
+        volumes = quotes.get("volume", [])
+
+        if not timestamps or not closes:
+            return None
+
+        df = pd.DataFrame({
+            "Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": volumes
+        }, index=pd.to_datetime(timestamps, unit="s"))
+        df.index = df.index.tz_localize(None).normalize()
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+        return df if len(df) >= 30 else None
+    except Exception:
+        return None
+
+
+def download_prices(tickers: list[str], period: str = "2y", chunk: int = 20, min_len: int = 60) -> dict:
+    """純單執行緒同步下載，零多執行緒池，記憶體消耗極低且不會崩潰"""
     out = {}
-    for i in range(0, len(tickers), chunk):
-        part = tickers[i:i + chunk]
-        try:
-            raw = yf.download(part, period=period, group_by="ticker", auto_adjust=True,
-                              threads=False, progress=False, timeout=25)
-        except Exception:
-            continue
-        if raw is None or raw.empty:
-            continue
-        if isinstance(raw.columns, pd.MultiIndex):
-            lvl0 = set(raw.columns.get_level_values(0))
-            if "Close" in lvl0 and len(part) == 1:
-                frames = {part[0]: raw.copy()}
-                frames[part[0]].columns = frames[part[0]].columns.get_level_values(0)
-            else:
-                frames = {t: raw[t] for t in part if t in lvl0}
-        else:
-            frames = {part[0]: raw}
-        for t, df in frames.items():
-            try:
-                df = df.dropna(how="all")
-                df = df[[c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]]
-                if df.shape[1] < 5 or len(df) < min_len:
-                    continue
-                df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
-                out[t] = df[~df.index.duplicated(keep="last")].sort_index()
-            except Exception:
-                continue
+    range_map = {"3y": "2y", "2y": "2y", "1y": "1y", "7d": "7d", "5d": "5d"}
+    q_range = range_map.get(period, "2y")
+
+    with requests.Session() as s:
+        for t in tickers:
+            df = _fetch_yahoo_chart_single(t, s, range_str=q_range)
+            if df is not None and len(df) >= min_len:
+                out[t] = df
     return out
 
 
@@ -272,13 +291,12 @@ def load_names():
                         names.setdefault(code, nm)
                         markets.setdefault(code, mk)
                         n += 1
-            msgs.append(f"名稱來源：{n} 檔")
-        except Exception as e:
-            msgs.append(f"名稱來源失敗：{e}")
+            msgs.append(f"簡稱來源：{n} 檔")
+        except Exception:
+            pass
     return names, markets, msgs
 
 
-# 集保大戶持股保留讀取（供背景看板參考，但權重全數移出策略評分）
 TDCC_FILE = Path("tdcc_history.csv")
 
 
@@ -286,7 +304,7 @@ def load_tdcc():
     msgs = []
     empty = pd.DataFrame(columns=["big400", "big1000", "d_big400", "date"])
     try:
-        r = _get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", timeout=30)
+        r = _get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", timeout=20)
         df = pd.read_csv(io.StringIO(r.content.decode("utf-8-sig", errors="ignore")))
         df.columns = [str(c).strip() for c in df.columns]
         c_date, c_code, c_lvl, _, _, c_pct = df.columns[:6]
@@ -318,10 +336,10 @@ def load_tdcc():
         else:
             cur["d_big400"] = np.nan
         cur["date"] = date
-        msgs.append(f"集保大戶持股參考資料：已更新至週 {date}")
+        msgs.append(f"集保大戶資料：更新至週 {date}")
         return cur, msgs
     except Exception as e:
-        msgs.append(f"集保大戶資料載入略過：{e}")
+        msgs.append(f"集保大戶載入略過：{e}")
         return empty, msgs
 
 
@@ -336,22 +354,13 @@ def merge_recent(hist: dict, recent: dict) -> dict:
     return out
 
 
-def is_partial(df: pd.DataFrame, now: dt.datetime | None = None) -> bool:
-    now = now or now_tw()
-    return bool(len(df)) and df.index[-1].date() == now.date() and now.time() < dt.time(13, 45)
-
-
-def closed_only(df: pd.DataFrame) -> pd.DataFrame:
-    return df.iloc[:-1] if is_partial(df) else df
-
-
-# ============================================================================
+# ----------------------------------------------------------------------------
 # 推播系統與訊號去重
-# ============================================================================
+# ----------------------------------------------------------------------------
 def send_telegram(token: str, chat_id: str, text: str):
     try:
         for i in range(0, len(text), 3800):
-            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=15,
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=12,
                               json={"chat_id": chat_id, "text": text[i:i + 3800], "disable_web_page_preview": True})
             if not r.ok:
                 return False, f"Telegram 失敗: {r.text[:100]}"
@@ -367,7 +376,7 @@ def send_line(token: str, user_id: str, text: str):
             msg = [{"type": "text", "text": text[i:i + 4500]}]
             url = "https://api.line.me/v2/bot/message/push" if user_id else "https://api.line.me/v2/bot/message/broadcast"
             body = {"to": user_id, "messages": msg} if user_id else {"messages": msg}
-            r = requests.post(url, headers=headers, json=body, timeout=15)
+            r = requests.post(url, headers=headers, json=body, timeout=12)
             if not r.ok:
                 return False, f"LINE 失敗: {r.text[:100]}"
         return True, "LINE ✔"
@@ -440,7 +449,7 @@ def alert_state_set(name: str, value):
 
 
 # ============================================================================
-# B. 量化引擎：台股升降級距與高勝率主力邏輯
+# B. 量化引擎：主力籌碼 ＆ 高勝率縮量回測策略
 # ============================================================================
 TRADING_DAYS = 252
 
@@ -481,11 +490,11 @@ class Costs:
 
 @dataclass(frozen=True)
 class Filters:
-    min_price: float = 35.0
-    min_turnover: float = 1.2e8
+    min_price: float = 30.0
+    min_turnover: float = 1.0e8
     min_amp: float = 8.0
-    bias5_max: float = 3.8
-    bias20_max: float = 10.0
+    bias5_max: float = 4.0
+    bias20_max: float = 11.0
 
 
 @dataclass(frozen=True)
@@ -502,11 +511,11 @@ class Params:
         return f"{self.preset}｜門檻{self.min_score:.0f}｜停損{self.stop_atr}ATR｜{tp}｜追蹤{self.trail_atr}ATR｜持股≤{self.hold}日"
 
 
-# 全面轉向「主力籌碼」與「相對強度」，大幅降低盲目追高比重
+# 全面廢除大戶權重，100% 聚焦主力資金（flow）與相對強度（rs）
 PRESETS = {
     "主力波段型": {"trend": 0.25, "compress": 0.10, "mom": 0.10, "rs": 0.25, "flow": 0.30},
-    "動能領頭羊": {"trend": 0.20, "compress": 0.05, "mom": 0.20, "rs": 0.35, "flow": 0.20},
-    "穩健回測型": {"trend": 0.30, "compress": 0.20, "mom": 0.10, "rs": 0.20, "flow": 0.20},
+    "強勢領頭羊": {"trend": 0.20, "compress": 0.05, "mom": 0.20, "rs": 0.35, "flow": 0.20},
+    "支撐回測型": {"trend": 0.30, "compress": 0.20, "mom": 0.10, "rs": 0.20, "flow": 0.20},
 }
 DEFAULT_GRID = dict(
     preset=list(PRESETS),
@@ -556,7 +565,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     dif = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     d["MACD_Hist"] = dif - dif.ewm(span=9, adjust=False).mean()
 
-    # 主力資金進出（CLV 與 CMF 柴金資金流）
+    # 主力資金作手特徵（CLV + CMF 資金流）
     clv = ((c - l) - (h - c)) / (h - l + 1e-9)
     d["CLV5"] = (clv * v).rolling(5).sum() / (v.rolling(5).sum() + 1e-9)
     d["CMF20"] = (clv * v).rolling(20).sum() / (v.rolling(20).sum() + 1e-9)
@@ -568,7 +577,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     dnv = v.where(c < pc, 0.0).rolling(20).sum()
     d["UDVR"] = upv / (dnv + 1.0)
 
-    # 縮量窒息洗盤特徵
+    # 縮量窒息洗盤特徵（避開追高，專抓主力洗盤點）
     d["Vol_Shrink"] = (v < d["Vol_MA5"] * 0.75).astype(float)
     d["Close_loc"] = (c - l) / (h - l + 1e-9)
     d["Range5"] = (h.rolling(5).max() - l.rolling(5).min()) / c * 100
@@ -601,30 +610,25 @@ def compute_features(P: dict, bench_close: pd.Series) -> dict:
     rs60 = (Cf / Cf.shift(60) - 1).sub(b / b.shift(60) - 1, axis=0)
 
     f = {}
-    # 趨勢
     f["trend"] = 0.25 * ((C > P["MA20"]).astype(float) + (P["MA20"] > P["MA60"]).astype(float)
                          + (P["MA20_slope5"] > 0).astype(float) + (P["EMA10"] > P["MA20"]).astype(float))
-    # 整理沉澱度
     f["compress"] = 0.6 * (1 - P["BB_Pct"]) + 0.4 * (P["Range5"] < 6).astype(float)
-    # 動能
     f["mom"] = (0.35 * ((P["RSI"] >= 50) & (P["RSI"] <= 68)).astype(float)
                 + 0.35 * (P["MACD_Hist"] > 0).astype(float)
                 + 0.30 * ((P["K"] > P["D"]) & (P["K"] <= 78)).astype(float))
-    # 相對強弱 RS
     rs = 0.6 * rs20 + 0.4 * rs60
     f["rs"] = (rs / 0.18).clip(-1, 1) * 0.5 + 0.5
 
-    # 主力資金流向（主力量價籌碼取代原大戶）
+    # 主力資金作手權重
     f["flow"] = (0.40 * ((P["CMF20"] + 0.08) / 0.28).clip(0, 1)
                  + 0.35 * ((P["AD_net20"] + 1) / 4).clip(0, 1)
                  + 0.25 * ((P["UDVR"] - 0.8) / 1.2).clip(0, 1))
 
-    # 型態：大幅獎勵「回測強勢支撐（10EMA/20MA）縮量止跌」
+    # 型態升級：專注「均線多頭＋縮量壓回 10EMA/20MA 止跌」
     pullback = ((P["MA20_slope5"] > 0) & (P["Bias20"].abs() <= 2.8) & (P["Bias5"].abs() <= 2.0)
                 & (P["Vol_Shrink"] > 0) & (C > P["MA20"])).astype(float)
     breakout = ((C > P["High20_prev"]) & (P["Volume"] > 1.3 * P["Vol_MA20"]) & (P["Close_loc"] > 0.6)).astype(float)
 
-    # 回測洗盤給滿分權重，追高突破給 0.6，避免隔日沖洗盤
     f["setup"] = np.maximum(pullback, 0.6 * breakout)
     return f
 
@@ -766,7 +770,7 @@ def simulate(eng: Engine, params: Params, start: int, end: int, max_pos: int = 4
             if o <= p["stop"]:
                 px, reason = o, "跳空停損"
             elif l <= p["stop"]:
-                px = p["stop"]
+                px, reason = p["stop"]
                 reason = "停損" if p["stop"] < p["fill"] else "移動停利"
             elif o >= p["tp"]:
                 px, reason = o, "跳空達標"
@@ -798,8 +802,8 @@ def simulate(eng: Engine, params: Params, start: int, end: int, max_pos: int = 4
 
 def summarize(trades: pd.DataFrame, equity: pd.Series | None = None) -> dict:
     s = dict(n=len(trades), win_rate=np.nan, avg_win=np.nan, avg_loss=np.nan, payoff=np.nan, expectancy=np.nan,
-             profit_factor=np.nan, tstat=np.nan, wr_lo=np.nan, wr_hi=np.nan, max_consec_loss=0, avg_hold=np.nan,
-             total_ret=np.nan, cagr=np.nan, mdd=np.nan, sharpe=np.nan, exp_lo=np.nan, exp_hi=np.nan)
+             profit_factor=np.nan, tstat=np.nan, max_consec_loss=0, avg_hold=np.nan,
+             total_ret=np.nan, cagr=np.nan, mdd=np.nan, sharpe=np.nan)
     if len(trades):
         r = trades["net_pct"].to_numpy()
         n = len(r)
@@ -904,15 +908,9 @@ def walk_forward(eng: Engine, grid: dict | None = None, train_days: int = 240, t
 
 
 # ============================================================================
-# 主力籌碼加減分：完全廢除落後大戶，100% 聚焦投信與外資
+# 主力籌碼加減分：100% 聚焦投信與外資
 # ============================================================================
 def make_main_force_chip_fn(chips, tdcc, weight: float = 1.0):
-    """
-    主力作手加減分（±10分上限）：
-    1. 投信近5日密集買超占成交額比重（台股波段飆股必備指標，佔 60%）
-    2. 外資近5日波段買超占比（佔 40%）
-    集保大戶（>400張）持股只作資訊顯示，不再介入分數權重。
-    """
     def fn(code: str, close: float, turnover5: float):
         b, det = 0.0, {}
         if chips is not None and len(chips) and code in chips.index and turnover5 > 0:
@@ -920,7 +918,7 @@ def make_main_force_chip_fn(chips, tdcc, weight: float = 1.0):
             denom = turnover5 * 5
             f_ratio = float(r["foreign"]) * close / denom
             t_ratio = float(r["trust"]) * close / denom
-            # 投信權重最高，外資次之
+            # 投信主導波段佔 6 分，外資佔 4 分
             b += float(np.clip(t_ratio / 0.03, -1, 1)) * 6.0 + float(np.clip(f_ratio / 0.05, -1, 1)) * 4.0
             det.update(foreign=float(r["foreign"]), trust=float(r["trust"]), total=float(r["total"]))
         if tdcc is not None and len(tdcc) and code in tdcc.index:
@@ -1030,13 +1028,13 @@ def bull_bear_checks(d: pd.DataFrame, chip: dict | None = None, rev_yoy: float |
     if c > x["MA20"]: bull.append("站上月線 20MA")
     if c > x["MA60"]: bull.append("站上季線 60MA")
     if x["MA5"] > x["MA10"] > x["MA20"]: bull.append("短天期均線多頭排列")
-    if 50 <= x["K"] <= 80 and x["K"] > x["D"]: bull.append("KD 強勢鈍化/黃金交叉")
+    if 50 <= x["K"] <= 80 and x["K"] > x["D"]: bull.append("KD 強勢黃金交叉")
     if x["MACD_Hist"] > 0: bull.append("MACD 柱狀體翻紅")
-    if 50 <= x["RSI"] <= 68: bull.append("RSI 處於健康上升波")
+    if 50 <= x["RSI"] <= 68: bull.append("RSI 處於健康動能波")
     if x["Volume"] > x["Vol_MA5"] * 1.25 and c > p["Close"]: bull.append("主力價漲量增攻擊")
     if c < x["MA20"]: bear.append("跌破月線")
     if c < x["MA60"]: bear.append("跌破季線")
-    if x["Bias20"] > 11: bear.append("乖離率過大，慎防獲利回吐")
+    if x["Bias20"] > 11: bear.append("乖離率偏高，慎防洗盤")
     if x["MACD_Hist"] < 0: bear.append("MACD 綠柱走弱")
     if chip:
         if chip.get("trust", 0) > 300_000: bull.append("投信近5日鎖碼買超")
@@ -1057,7 +1055,7 @@ def holding_health(d: pd.DataFrame, params: Params) -> dict:
     if x["MA20_slope5"] < 0: flags.append("月線下彎走空"); weak += 1
     if close < x["MA60"]: flags.append("跌破季線"); weak += 2
     if x["RSI"] < 45: flags.append("RSI<45 動能衰退"); weak += 1
-    if close <= stop: flags.append("跌破量化停損防守價"); weak += 3
+    if close <= stop: flags.append("跌破量化防守價"); weak += 3
     return dict(close=close, stop=stop, tp=tp, weak=weak, flags=flags)
 
 
@@ -1146,9 +1144,8 @@ def build_name_market(meta: dict):
     return names, market
 
 
-def build_engine_core(meta, n, excl, min_price, min_turn_yi, min_amp, b5, b20, fee_disc, slip_pct,
-                      risk_frac, use_intraday, get_prices_fn):
-    uni, notes = meta["uni"].copy(), []
+def build_engine_core(meta, n, excl, min_price, min_turn_yi, fee_disc, slip_pct, risk_frac, get_prices_fn):
+    uni = meta["uni"].copy()
     if not uni.empty:
         if excl:
             uni = uni[~uni["industry"].isin(list(excl))]
@@ -1159,14 +1156,13 @@ def build_engine_core(meta, n, excl, min_price, min_turn_yi, min_amp, b5, b20, f
             uni = uni[uni["code"].isin(NAME_MAP)]
     else:
         uni = pd.DataFrame([dict(code=c, name=NAME_MAP[c], market="TW", industry="") for c in NAME_MAP])
+
     tickers = [f"{r.code}.{r.market}" for r in uni.itertuples()]
     prices = get_prices_fn(tuple(tickers + ["^TWII"]))
     bench = prices.pop("^TWII", None)
     if bench is None or not prices:
-        raise RuntimeError("價格資料下載失敗（yfinance）。請檢查網路或稍後重試。")
-    if not use_intraday:
-        prices = {t: closed_only(df) for t, df in prices.items()}
-        bench = closed_only(bench)
+        raise RuntimeError("加權指數或價格資料連線逾時，請點擊重試。")
+
     dfs = {}
     for t, df in prices.items():
         try:
@@ -1174,9 +1170,9 @@ def build_engine_core(meta, n, excl, min_price, min_turn_yi, min_amp, b5, b20, f
         except Exception:
             continue
     P = build_panel(dfs)
-    flt = Filters(min_price, min_turn_yi * 1e8, min_amp, b5, b20)
+    flt = Filters(min_price, min_turn_yi * 1e8, 8.0, 4.0, 11.0)
     eng = Engine(P, bench["Close"], flt, Costs(fee_disc=fee_disc, slip=slip_pct / 100.0), risk_frac=risk_frac)
-    return eng, bench, notes
+    return eng, bench
 
 
 def get_ind_map(codes: list, market: dict, get_prices_fn) -> dict:
@@ -1288,18 +1284,14 @@ def dispatch_alerts(alerts: list, cfg: dict, enabled=None):
     return "；".join(m for _, m in res) or "推播完成", fresh
 
 
-# ============================================================================
-# 常駐背景服務模式（Daemon）
-# ============================================================================
 def daemon_main():
     cfg = notify_cfg()
     cap = float(os.environ.get("CAPITAL", "1000000"))
     rp = float(os.environ.get("RISK_PCT", "1.5"))
-    n = int(os.environ.get("N_UNIVERSE", "120"))
+    n = int(os.environ.get("N_UNIVERSE", "80"))
     chip_w = float(os.environ.get("CHIP_WEIGHT", "1"))
-    use_intraday = os.environ.get("USE_INTRADAY", "0") == "1"
 
-    hist = lru_cache(maxsize=3)(lambda tk, day: download_prices(list(tk), "3y"))
+    hist = lru_cache(maxsize=3)(lambda tk, day: download_prices(list(tk), "2y"))
     rec = lru_cache(maxsize=2)(lambda tk, bk: download_prices(list(tk), "5d", min_len=2))
     meta_fn = lru_cache(maxsize=2)(load_meta_core)
     print("🚀 台股量化主力 Daemon 已啟動；盤中每 20 分鐘掃描一次...", flush=True)
@@ -1313,8 +1305,8 @@ def daemon_main():
                 meta = meta_fn(bk.rsplit("-", 1)[0])
                 names, market = build_name_market(meta)
                 params = Params()
-                eng, _, _ = build_engine_core(meta, n, ["金融保險業", "航運業"], 35.0, 1.2, 8.0, 3.8, 10.0,
-                                              0.6, 0.10, rp / 100.0, use_intraday, gp)
+                eng, _ = build_engine_core(meta, n, ["金融保險業", "航運業"], 30.0, 1.0,
+                                           0.6, 0.10, rp / 100.0, gp)
                 ind_map = get_ind_map([r.get("code") for r in load_portfolio()] + load_watchlist(), market, gp)
                 ctx = dict(names=names, capital=cap, risk_pct=rp, portfolio=load_portfolio(),
                            watch=load_watchlist(), ind_map=ind_map,
@@ -1333,7 +1325,7 @@ if __name__ == "__main__" and "--daemon" in sys.argv:
 
 
 # ============================================================================
-# D. 前端介面（Streamlit）
+# D. 前端頁面佈局
 # ============================================================================
 st.set_page_config(page_title="台股量化操盤決策系統", layout="wide", initial_sidebar_state="expanded")
 
@@ -1365,18 +1357,18 @@ sb.markdown("### 資金與風控設定")
 capital = sb.number_input("操作資金規模 (TWD)", 100_000, 50_000_000, 1_000_000, 50_000)
 risk_pct = sb.slider("單筆最大承受風險 (%)", 0.5, 3.0, 1.5, 0.1)
 
-sb.markdown("### 股票池規模（已作穩定性保護）")
-n_universe = sb.select_slider("分析股票池（當日成交值前 N 檔）", [60, 80, 100, 120, 150], value=100)
+sb.markdown("### 股票池規模（零執行緒安全防禦）")
+n_universe = sb.select_slider("分析股票池（當日成交值前 N 檔）", [50, 70, 90, 120], value=70)
 excl = sb.multiselect("排除產業", ["金融保險業", "航運業", "水泥工業", "食品工業", "貿易百貨業"], default=["金融保險業", "航運業"])
-min_price = sb.number_input("最低股價", 5.0, 300.0, 35.0, 5.0)
-min_turn_yi = sb.number_input("5日均成交值下限（億）", 0.5, 10.0, 1.2, 0.1)
+min_price = sb.number_input("最低股價", 5.0, 300.0, 30.0, 5.0)
+min_turn_yi = sb.number_input("5日均成交值下限（億）", 0.5, 10.0, 1.0, 0.1)
 
 sb.markdown("### 交易成本與籌碼")
 fee_disc = sb.slider("手續費折扣（0.6 = 6折）", 0.2, 1.0, 0.6, 0.05)
 slip_pct = sb.slider("單邊預估滑價 (%)", 0.0, 0.5, 0.10, 0.05)
 chip_weight = sb.slider("主力籌碼加減分權重 (投信+外資)", 0.0, 2.0, 1.0, 0.1)
 
-if sb.button("🔄 強制清除快取並重新掃描"):
+if sb.button("🔄 強制刷新並重新分析"):
     st.cache_data.clear()
     st.cache_resource.clear()
     st.rerun()
@@ -1394,7 +1386,7 @@ def load_meta(hour_key: str):
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def prices_hist(tickers: tuple, day_key: str):
-    return download_prices(list(tickers), period="3y")
+    return download_prices(list(tickers), period="2y")
 
 
 @st.cache_data(ttl=1200, show_spinner=False)
@@ -1410,17 +1402,18 @@ def get_prices(tickers, bucket: str) -> dict:
 @st.cache_resource(ttl=1200, show_spinner=False)
 def build_engine(bucket, n, excl_t, min_price, min_turn_yi, fee_disc, slip_pct, risk_pct):
     meta_ = load_meta(bucket.rsplit("-", 1)[0])
-    return build_engine_core(meta_, n, list(excl_t), min_price, min_turn_yi, 8.0, 3.8, 10.0,
-                             fee_disc, slip_pct, risk_pct / 100.0, False, lambda tk: get_prices(tk, bucket))
+    return build_engine_core(meta_, n, list(excl_t), min_price, min_turn_yi,
+                             fee_disc, slip_pct, risk_pct / 100.0, lambda tk: get_prices(tk, bucket))
 
 
 b_key = bucket_key()
 try:
-    with st.spinner("量化引擎計算中（單執行緒安全模式防護）..."):
-        eng, bench_df, eng_notes = build_engine(b_key, n_universe, tuple(excl), min_price, min_turn_yi, fee_disc, slip_pct, risk_pct)
+    with st.spinner("🚀 量化引擎計算中（純同步安全連線）..."):
+        eng, bench_df = build_engine(b_key, n_universe, tuple(excl), min_price, min_turn_yi, fee_disc, slip_pct, risk_pct)
         meta = load_meta(b_key.rsplit("-", 1)[0])
 except Exception as e:
     st.error(f"系統啟動中發生錯誤：{e}")
+    st.info("💡 提示：若剛剛曾在 Streamlit Cloud 發生 thread 崩潰，請務必至右下角選單點擊『Reboot App』釋放舊殘留執行緒。")
     st.stop()
 
 NAMES, ALL_MARKET = build_name_market(meta)
@@ -1468,7 +1461,7 @@ def candle_fig(df: pd.DataFrame, n: int = 50, stop=None, tp=None, height=340, ti
 
 
 # ============================================================================
-# 完整 6 大分頁建置
+# 完整 6 大頁籤
 # ============================================================================
 tab_daily, tab_port, tab_sec, tab_val, tab_scr, tab_alert = st.tabs([
     "🎯 每日主力決策推薦", "💼 持股健檢與換股", "🌐 族群多空儀表板",
@@ -1487,7 +1480,7 @@ with tab_daily:
 
     cands = latest_candidates(eng, params, top=10, exclude=meta["punish"], chip_fn=chip_fn)
     if not cands:
-        st.warning("目前市場暫無同時符合「多頭排列 + 縮量止跌回測 + 主力鎖碼」之優質標的，空手觀望亦為策略一環。")
+        st.warning("目前市場暫無同時符合「多頭排列 + 縮量止跌回測 + 主力鎖碼」之標的，空手觀望亦為策略一環。")
     else:
         t1 = cands[0]
         code = t1["code"]
@@ -1518,7 +1511,7 @@ with tab_daily:
             <div><div class="rl">動能強度</div><div class="rv">{subs['mom']:.0f}</div></div>
             <div><div class="rl">相對大盤 RS</div><div class="rv">{subs['rs']:.0f}</div></div>
             <div><div class="rl">主力資金流</div><div class="rv">{subs['flow']:.0f}</div></div>
-            <div><div class="rl">進場型態分</div><div class="rv">{subs['setup']:.0f}</div></div>
+            <div><div class="rl">回測型態分</div><div class="rv">{subs['setup']:.0f}</div></div>
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1549,7 +1542,8 @@ with tab_daily:
             rows.append({
                 "排名": f"#{i}", "標的": label(c["code"]), "主力總分": round(c["final"], 1), "技術分": round(c["score"], 1),
                 "主力加分": round(c["bonus"], 1), "收盤": c["close"], "漲跌%": round(c["pct"], 2),
-                "防守停損": c["stop"], "波段目標": c["tp"], "投信5日(張)": round(cdet.get("trust", 0) / 1000) if "trust" in cdet else "—",
+                "防守停損": c["stop"], "波段目標": c["tp"],
+                "投信5日(張)": round(cdet.get("trust", 0) / 1000) if "trust" in cdet else "—",
                 "外資5日(張)": round(cdet.get("foreign", 0) / 1000) if "foreign" in cdet else "—",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -1577,7 +1571,6 @@ with tab_port:
         st.success("持股資料已成功寫入 portfolio.json！")
         st.rerun()
 
-    # 健檢分析
     hold_health_list = []
     for r in portfolio_rows:
         c = str(r.get("code") or "").strip()
@@ -1593,7 +1586,6 @@ with tab_port:
     if hold_health_list:
         st.dataframe(pd.DataFrame(hold_health_list), use_container_width=True, hide_index=True)
 
-    # 換股判斷
     if hold_health_list and cands:
         weakest = max(hold_health_list, key=lambda x: x["弱勢評分"])
         if weakest["弱勢評分"] >= 2 and regime_ok:
@@ -1664,7 +1656,6 @@ with tab_val:
         fig_eq.update_layout(height=340, title="策略累積淨值 vs 大盤基準 (起點 = 1.0)", paper_bgcolor="#080c14", plot_bgcolor="#080c14", font=dict(color="#fff"))
         st.plotly_chart(fig_eq, use_container_width=True)
 
-        # 蒙地卡羅破產率分析
         st.markdown("##### 🎲 蒙地卡羅模擬（區塊自助抽樣 1500 次）")
         mc = mc_ruin(wf["oos_trades"]["net_pct"].tolist() if len(wf["oos_trades"]) else [])
         if mc:

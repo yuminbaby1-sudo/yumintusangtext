@@ -1,8 +1,8 @@
 """
-台股量化操盤決策系統 v2（單檔版）
+台股量化操盤決策系統 v3（完整功能旗艦版）
 執行：pip install streamlit yfinance pandas numpy plotly requests lxml html5lib beautifulsoup4 tzdata
-      streamlit run tw_quant_app.py
-      （背景推播模式）python tw_quant_app.py --daemon
+     streamlit run tw_quant_app.py
+     （背景推播模式）python tw_quant_app.py --daemon
 """
 from __future__ import annotations
 
@@ -28,10 +28,11 @@ import requests
 import streamlit as st
 
 # ============================================================================
-# A. 資料來源層
+# A. 資料來源層（修復 Thread 限制與連線健全度）
 # ============================================================================
 TZ = ZoneInfo("Asia/Taipei")
-UA = {"User-Agent": "Mozilla/5.0 (compatible; tw-quant/1.0)"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
 try:
     requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
 except Exception:
@@ -42,9 +43,9 @@ def now_tw() -> dt.datetime:
     return dt.datetime.now(TZ)
 
 
-def _get(url: str, params: dict | None = None, timeout: int = 25) -> requests.Response:
+def _get(url: str, params: dict | None = None, timeout: int = 20) -> requests.Response:
     last = None
-    for verify in (True, False):   # 部分政府網站憑證鏈在新版 Python 會驗證失敗
+    for verify in (True, False):
         try:
             r = requests.get(url, params=params, headers=UA, timeout=timeout, verify=verify)
             r.raise_for_status()
@@ -65,7 +66,6 @@ def _num(x) -> float:
         return np.nan
 
 
-# ----------------------------------------------------------------------------
 def load_universe():
     rows, msgs = [], []
     for mode, sfx in ((2, "TW"), (4, "TWO")):
@@ -93,7 +93,7 @@ def load_universe():
                     if cfi not in ("nan", "") and not cfi.startswith("ES"):
                         continue
                 rows.append(dict(code=code, name=name.strip(), market=sfx,
-                                 industry=str(row[c_ind]) if c_ind else ""))
+                                 industry=str(row[c_ind]).strip() if c_ind else ""))
         except Exception as e:
             msgs.append(f"股票清單（{'上市' if mode == 2 else '上櫃'}）抓取失敗：{e}")
     df = pd.DataFrame(rows).drop_duplicates("code") if rows else pd.DataFrame(columns=["code", "name", "market", "industry"])
@@ -127,11 +127,11 @@ def load_daily_turnover():
 
 
 def load_institutional(n_days: int = 5):
-    """上市三大法人近 n 個交易日買賣超股數（加總）。上櫃暫無來源，UI 會顯示『無資料』。"""
+    """三大法人近 n 個交易日買賣超（鎖定真正的主力作手：投信與波段外資）"""
     msgs, frames, used = [], [], []
     day = now_tw().date()
     attempts = 0
-    while len(used) < n_days and attempts < 16:
+    while len(used) < n_days and attempts < 14:
         attempts += 1
         if day.weekday() < 5:
             try:
@@ -147,7 +147,7 @@ def load_institutional(n_days: int = 5):
                                        for r in js["data"]], columns=["code", "foreign", "trust", "total"])
                     frames.append(df)
                     used.append(day)
-                time.sleep(0.5)
+                time.sleep(0.3)
             except Exception as e:
                 msgs.append(f"T86 {day} 失敗：{e}")
         day -= dt.timedelta(days=1)
@@ -155,7 +155,7 @@ def load_institutional(n_days: int = 5):
         msgs.append("三大法人資料抓取失敗，籌碼欄位將顯示『無資料』。")
         return pd.DataFrame(columns=["foreign", "trust", "total"]), [], msgs
     out = pd.concat(frames).groupby("code")[["foreign", "trust", "total"]].sum()
-    msgs.append(f"三大法人（上市）：{len(used)} 個交易日 {min(used)}~{max(used)}")
+    msgs.append(f"三大法人主力籌碼（上市）：{len(used)} 個交易日累計")
     return out, used, msgs
 
 
@@ -175,7 +175,7 @@ def load_revenue_yoy():
                     n += 1
             msgs.append(f"月營收 YoY：{n} 檔（{'上市' if 'twse' in u else '上櫃'}）")
         except Exception as e:
-            msgs.append(f"月營收抓取失敗（{'上市' if 'twse' in u else '上櫃'}）：{e}")
+            msgs.append(f"月營收抓取失敗：{e}")
     return pd.Series(out, dtype=float), msgs
 
 
@@ -188,14 +188,14 @@ def load_flags():
                 ck = next((k for k in r if k.lower().endswith("code") or "代號" in k), None)
                 if ck:
                     bucket.add(str(r[ck]).strip())
-            msgs.append(f"{name}（上市）：{len(bucket)} 檔")
+            msgs.append(f"{name}：{len(bucket)} 檔")
         except Exception as e:
             msgs.append(f"{name}抓取失敗：{e}")
     return punish, notice, msgs
 
 
-# ----------------------------------------------------------------------------
-def download_prices(tickers: list[str], period: str = "3y", chunk: int = 100, min_len: int = 120) -> dict:
+def download_prices(tickers: list[str], period: str = "3y", chunk: int = 40, min_len: int = 90) -> dict:
+    """下載歷史價格；強制關閉 threads，解決 Streamlit Cloud 執行緒耗盡崩潰"""
     import yfinance as yf
 
     out = {}
@@ -203,14 +203,14 @@ def download_prices(tickers: list[str], period: str = "3y", chunk: int = 100, mi
         part = tickers[i:i + chunk]
         try:
             raw = yf.download(part, period=period, group_by="ticker", auto_adjust=True,
-                              threads=True, progress=False)
+                              threads=False, progress=False, timeout=25)
         except Exception:
             continue
         if raw is None or raw.empty:
             continue
         if isinstance(raw.columns, pd.MultiIndex):
             lvl0 = set(raw.columns.get_level_values(0))
-            if "Close" in lvl0 and len(part) == 1:          # 單檔時層級可能反過來
+            if "Close" in lvl0 and len(part) == 1:
                 frames = {part[0]: raw.copy()}
                 frames[part[0]].columns = frames[part[0]].columns.get_level_values(0)
             else:
@@ -241,9 +241,6 @@ def links(code: str, market: str = "TW") -> dict:
     }
 
 
-# ----------------------------------------------------------------------------
-# 機密設定：環境變數 > Streamlit secrets
-# ----------------------------------------------------------------------------
 def get_secret(name: str, default: str = "") -> str:
     v = os.environ.get(name)
     if v:
@@ -256,9 +253,6 @@ def get_secret(name: str, default: str = "") -> str:
         return default
 
 
-# ----------------------------------------------------------------------------
-# 名稱/市場別：多來源合併，避免只顯示代碼或名稱錯誤（公司簡稱優先）
-# ----------------------------------------------------------------------------
 def load_names():
     names, markets, msgs = {}, {}, []
     src = [("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "TW", ("公司簡稱",)),
@@ -267,26 +261,24 @@ def load_names():
            ("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", "TWO", ("CompanyName",))]
     for url, mk, keys in src:
         try:
-            js, n = _get(url).json(), 0
+            js = _get(url).json()
+            n = 0
             for r in js:
                 ck = next((k for k in r if "公司代號" in k or k.lower().endswith("code")), None)
                 nk = next((k for k in keys if k in r), None) or next((k for k in r if "簡稱" in k), None)
                 if ck and nk:
                     code, nm = str(r[ck]).strip(), str(r[nk]).strip()
                     if re.fullmatch(r"\d{4}", code) and nm:
-                        names.setdefault(code, nm)          # 先到先贏 = 優先序
+                        names.setdefault(code, nm)
                         markets.setdefault(code, mk)
                         n += 1
-            msgs.append(f"名稱來源 {url.split('/')[-1]}：{n} 檔")
+            msgs.append(f"名稱來源：{n} 檔")
         except Exception as e:
-            msgs.append(f"名稱來源 {url.split('/')[-1]} 失敗：{e}")
+            msgs.append(f"名稱來源失敗：{e}")
     return names, markets, msgs
 
 
-# ----------------------------------------------------------------------------
-# 集保戶股權分散表 → 大戶(>400張、>1000張)持股比例，並自動累積每週歷史以計算週增減
-# 持股分級 12~15 = 400張以上；15 = 1000張以上（以官方欄位說明為準，請自行核對一次）
-# ----------------------------------------------------------------------------
+# 集保大戶持股保留讀取（供背景看板參考，但權重全數移出策略評分）
 TDCC_FILE = Path("tdcc_history.csv")
 
 
@@ -294,7 +286,7 @@ def load_tdcc():
     msgs = []
     empty = pd.DataFrame(columns=["big400", "big1000", "d_big400", "date"])
     try:
-        r = _get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", timeout=60)
+        r = _get("https://opendata.tdcc.com.tw/getOD.ashx?id=1-5", timeout=30)
         df = pd.read_csv(io.StringIO(r.content.decode("utf-8-sig", errors="ignore")))
         df.columns = [str(c).strip() for c in df.columns]
         c_date, c_code, c_lvl, _, _, c_pct = df.columns[:6]
@@ -326,16 +318,13 @@ def load_tdcc():
         else:
             cur["d_big400"] = np.nan
         cur["date"] = date
-        msgs.append(f"集保大戶持股：{len(cur)} 檔（資料週 {date}；歷史週數 {hist['date'].nunique()}，週增減需 ≥2 週）")
+        msgs.append(f"集保大戶持股參考資料：已更新至週 {date}")
         return cur, msgs
     except Exception as e:
-        msgs.append(f"集保大戶持股抓取失敗：{e}")
+        msgs.append(f"集保大戶資料載入略過：{e}")
         return empty, msgs
 
 
-# ----------------------------------------------------------------------------
-# 價格增量合併 / 盤中未收盤 K 線處理
-# ----------------------------------------------------------------------------
 def merge_recent(hist: dict, recent: dict) -> dict:
     out = dict(hist)
     for t, r in recent.items():
@@ -356,19 +345,19 @@ def closed_only(df: pd.DataFrame) -> pd.DataFrame:
     return df.iloc[:-1] if is_partial(df) else df
 
 
-# ----------------------------------------------------------------------------
-# 推播：Telegram / LINE Messaging API（LINE Notify 已於 2025/3/31 終止服務）
-# ----------------------------------------------------------------------------
+# ============================================================================
+# 推播系統與訊號去重
+# ============================================================================
 def send_telegram(token: str, chat_id: str, text: str):
     try:
         for i in range(0, len(text), 3800):
-            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=20,
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=15,
                               json={"chat_id": chat_id, "text": text[i:i + 3800], "disable_web_page_preview": True})
             if not r.ok:
-                return False, f"Telegram 失敗 {r.status_code}: {r.text[:150]}"
+                return False, f"Telegram 失敗: {r.text[:100]}"
         return True, "Telegram ✔"
     except Exception as e:
-        return False, f"Telegram 例外：{e}"
+        return False, f"Telegram 例外: {e}"
 
 
 def send_line(token: str, user_id: str, text: str):
@@ -376,16 +365,14 @@ def send_line(token: str, user_id: str, text: str):
     try:
         for i in range(0, len(text), 4500):
             msg = [{"type": "text", "text": text[i:i + 4500]}]
-            if user_id:
-                url, body = "https://api.line.me/v2/bot/message/push", {"to": user_id, "messages": msg}
-            else:
-                url, body = "https://api.line.me/v2/bot/message/broadcast", {"messages": msg}
-            r = requests.post(url, headers=headers, json=body, timeout=20)
+            url = "https://api.line.me/v2/bot/message/push" if user_id else "https://api.line.me/v2/bot/message/broadcast"
+            body = {"to": user_id, "messages": msg} if user_id else {"messages": msg}
+            r = requests.post(url, headers=headers, json=body, timeout=15)
             if not r.ok:
-                return False, f"LINE 失敗 {r.status_code}: {r.text[:150]}"
+                return False, f"LINE 失敗: {r.text[:100]}"
         return True, "LINE ✔"
     except Exception as e:
-        return False, f"LINE 例外：{e}"
+        return False, f"LINE 例外: {e}"
 
 
 def notify_cfg() -> dict:
@@ -402,9 +389,6 @@ def notify_all(text: str, cfg: dict) -> list:
     return res
 
 
-# ----------------------------------------------------------------------------
-# 訊號去重（檔案持久化，跨工作階段/重啟不重複推播）
-# ----------------------------------------------------------------------------
 ALERT_FILE = Path("alert_state.json")
 _ALERT_LOCK = threading.Lock()
 
@@ -456,49 +440,35 @@ def alert_state_set(name: str, value):
 
 
 # ============================================================================
-# B. 量化引擎
+# B. 量化引擎：台股升降級距與高勝率主力邏輯
 # ============================================================================
 TRADING_DAYS = 252
 
 
-# ----------------------------------------------------------------------------
-# 台股升降單位
-# ----------------------------------------------------------------------------
 def tick_size(p: float) -> float:
-    if p < 10:
-        return 0.01
-    if p < 50:
-        return 0.05
-    if p < 100:
-        return 0.1
-    if p < 500:
-        return 0.5
-    if p < 1000:
-        return 1.0
+    if p < 10: return 0.01
+    if p < 50: return 0.05
+    if p < 100: return 0.1
+    if p < 500: return 0.5
+    if p < 1000: return 1.0
     return 5.0
 
 
 def tick_round(p: float, mode: str = "nearest") -> float:
     t = tick_size(p)
     n = p / t
-    if mode == "down":
-        n = np.floor(n + 1e-9)
-    elif mode == "up":
-        n = np.ceil(n - 1e-9)
-    else:
-        n = np.round(n)
+    if mode == "down": n = np.floor(n + 1e-9)
+    elif mode == "up": n = np.ceil(n - 1e-9)
+    else: n = np.round(n)
     return round(float(n * t), 2)
 
 
-# ----------------------------------------------------------------------------
-# 設定
-# ----------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Costs:
-    fee_rate: float = 0.001425   # 公定手續費
-    fee_disc: float = 0.6        # 券商折扣（0.6 = 6 折）
-    tax: float = 0.003           # 證交稅（賣出）
-    slip: float = 0.001          # 單邊滑價
+    fee_rate: float = 0.001425
+    fee_disc: float = 0.6
+    tax: float = 0.003
+    slip: float = 0.001
 
     @property
     def fee(self) -> float:
@@ -512,47 +482,42 @@ class Costs:
 @dataclass(frozen=True)
 class Filters:
     min_price: float = 35.0
-    min_turnover: float = 1.5e8   # 5 日均成交值 (TWD)
-    min_amp: float = 8.0          # 20 日振幅 %
-    bias5_max: float = 3.5
+    min_turnover: float = 1.2e8
+    min_amp: float = 8.0
+    bias5_max: float = 3.8
     bias20_max: float = 10.0
 
 
 @dataclass(frozen=True)
 class Params:
-    preset: str = "均衡"
+    preset: str = "主力波段型"
     min_score: float = 65.0
-    stop_atr: float = 2.0
-    tp_r: float = 2.0
-    hold: int = 10
-    trail_atr: float = 3.0
+    stop_atr: float = 1.8
+    tp_r: float = 2.5
+    hold: int = 15
+    trail_atr: float = 2.5
 
     def label(self) -> str:
         tp = f"停利{self.tp_r}R" if self.tp_r > 0 else "移動停利"
-        return (f"{self.preset}｜門檻{self.min_score:.0f}｜停損{self.stop_atr}ATR｜{tp}｜"
-                f"追蹤{self.trail_atr}ATR｜持股≤{self.hold}日")
+        return f"{self.preset}｜門檻{self.min_score:.0f}｜停損{self.stop_atr}ATR｜{tp}｜追蹤{self.trail_atr}ATR｜持股≤{self.hold}日"
 
 
-# 六大類特徵的權重預設（交給 walk-forward 選，不再拍腦袋固定 75/20/5）
+# 全面轉向「主力籌碼」與「相對強度」，大幅降低盲目追高比重
 PRESETS = {
-    "均衡":       {"trend": 0.22, "compress": 0.13, "mom": 0.15, "rs": 0.20, "flow": 0.20, "setup": 0.10},
-    "大戶籌碼型": {"trend": 0.15, "compress": 0.10, "mom": 0.10, "rs": 0.15, "flow": 0.40, "setup": 0.10},
-    "技術突破型": {"trend": 0.20, "compress": 0.15, "mom": 0.15, "rs": 0.15, "flow": 0.10, "setup": 0.25},
-    "強勢動能":   {"trend": 0.15, "compress": 0.05, "mom": 0.25, "rs": 0.35, "flow": 0.10, "setup": 0.10},
+    "主力波段型": {"trend": 0.25, "compress": 0.10, "mom": 0.10, "rs": 0.25, "flow": 0.30},
+    "動能領頭羊": {"trend": 0.20, "compress": 0.05, "mom": 0.20, "rs": 0.35, "flow": 0.20},
+    "穩健回測型": {"trend": 0.30, "compress": 0.20, "mom": 0.10, "rs": 0.20, "flow": 0.20},
 }
 DEFAULT_GRID = dict(
     preset=list(PRESETS),
-    min_score=[60, 70],
-    stop_atr=[1.5, 2.5],
-    tp_r=[2.0, 3.0, 0.0],        # 0 = 不設固定停利，只用移動停損讓獲利奔跑
-    trail_atr=[2.0, 3.0],
-    hold=[10, 20],
+    min_score=[62, 68],
+    stop_atr=[1.5, 2.0],
+    tp_r=[2.0, 3.0, 0.0],
+    trail_atr=[2.0, 2.8],
+    hold=[12, 18],
 )
 
 
-# ----------------------------------------------------------------------------
-# 指標（單一標的）
-# ----------------------------------------------------------------------------
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d = df[["Open", "High", "Low", "Close", "Volume"]].astype(float).copy()
     d = d.dropna(subset=["Open", "High", "Low", "Close"])
@@ -572,11 +537,11 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     std20 = c.rolling(20).std()
     d["BB_Width"] = 4 * std20 / d["MA20"]
-    d["BB_Pct"] = d["BB_Width"].rolling(60).rank(pct=True)  # 帶寬在近60日的分位，越低越收斂
+    d["BB_Pct"] = d["BB_Width"].rolling(60).rank(pct=True)
 
     pc = c.shift(1)
     tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
-    d["ATR"] = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()  # Wilder
+    d["ATR"] = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
     delta = c.diff()
     ag = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
@@ -591,24 +556,20 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     dif = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
     d["MACD_Hist"] = dif - dif.ewm(span=9, adjust=False).mean()
 
-    # ---- 大戶/主力足跡（量價代理，可回測；真實法人/大戶資料只用於即時加減分）----
+    # 主力資金進出（CLV 與 CMF 柴金資金流）
     clv = ((c - l) - (h - c)) / (h - l + 1e-9)
     d["CLV5"] = (clv * v).rolling(5).sum() / (v.rolling(5).sum() + 1e-9)
-    d["CMF20"] = (clv * v).rolling(20).sum() / (v.rolling(20).sum() + 1e-9)      # Chaikin 資金流
-    big = v > 1.5 * d["Vol_MA20"].shift(1)
-    acc = (big & (c > o) & (clv > 0.4)).astype(float)                            # 大量收高 = 吸籌日
-    dist = (big & (c < o) & (clv < -0.4)).astype(float)                          # 大量收低 = 出貨日
+    d["CMF20"] = (clv * v).rolling(20).sum() / (v.rolling(20).sum() + 1e-9)
+    big = v > 1.3 * d["Vol_MA20"].shift(1)
+    acc = (big & (c > o) & (clv > 0.3)).astype(float)
+    dist = (big & (c < o) & (clv < -0.3)).astype(float)
     d["AD_net20"] = acc.rolling(20).sum() - dist.rolling(20).sum()
     upv = v.where(c > pc, 0.0).rolling(20).sum()
     dnv = v.where(c < pc, 0.0).rolling(20).sum()
-    d["UDVR"] = upv / (dnv + 1.0)                                                # 上漲量/下跌量
+    d["UDVR"] = upv / (dnv + 1.0)
 
-    tp = (h + l + c) / 3
-    rmf = tp * v
-    pos = rmf.where(tp > tp.shift(1), 0.0).rolling(14).sum()
-    neg = rmf.where(tp < tp.shift(1), 0.0).rolling(14).sum()
-    d["MFI"] = 100 - 100 / (1 + pos / (neg + 1e-9))
-
+    # 縮量窒息洗盤特徵
+    d["Vol_Shrink"] = (v < d["Vol_MA5"] * 0.75).astype(float)
     d["Close_loc"] = (c - l) / (h - l + 1e-9)
     d["Range5"] = (h.rolling(5).max() - l.rolling(5).min()) / c * 100
     d["Low5"] = l.rolling(5).min()
@@ -620,22 +581,18 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 PANEL_FIELDS = [
     "Open", "High", "Low", "Close", "Volume", "MA5", "MA10", "MA20", "MA60", "MA20_slope5", "EMA10",
     "Vol_MA5", "Vol_MA20", "Turnover_MA5", "Amp20", "Bias5", "Bias10", "Bias20", "BB_Pct", "ATR", "RSI",
-    "K", "D", "MACD_Hist", "MFI", "CLV5", "CMF20", "AD_net20", "UDVR", "Close_loc", "Range5", "Low5",
-    "High20_prev", "pct",
+    "K", "D", "MACD_Hist", "CLV5", "CMF20", "AD_net20", "UDVR", "Vol_Shrink", "Close_loc", "Range5",
+    "Low5", "High20_prev", "pct"
 ]
 
 
 def build_panel(stock_dfs: dict) -> dict:
-    """code -> indicator df  ==>  field -> DataFrame(date x code)"""
     P = {}
     for f in PANEL_FIELDS:
         P[f] = pd.concat({code: df[f] for code, df in stock_dfs.items()}, axis=1).sort_index()
     return P
 
 
-# ----------------------------------------------------------------------------
-# 特徵 / 分數 / 過濾
-# ----------------------------------------------------------------------------
 def compute_features(P: dict, bench_close: pd.Series) -> dict:
     C = P["Close"]
     Cf = C.ffill()
@@ -644,25 +601,31 @@ def compute_features(P: dict, bench_close: pd.Series) -> dict:
     rs60 = (Cf / Cf.shift(60) - 1).sub(b / b.shift(60) - 1, axis=0)
 
     f = {}
+    # 趨勢
     f["trend"] = 0.25 * ((C > P["MA20"]).astype(float) + (P["MA20"] > P["MA60"]).astype(float)
                          + (P["MA20_slope5"] > 0).astype(float) + (P["EMA10"] > P["MA20"]).astype(float))
+    # 整理沉澱度
     f["compress"] = 0.6 * (1 - P["BB_Pct"]) + 0.4 * (P["Range5"] < 6).astype(float)
-    vol_up = ((P["Volume"] > P["Vol_MA5"] * 1.2) & (C > P["Open"])).astype(float)
-    f["mom"] = (0.3 * ((P["RSI"] >= 50) & (P["RSI"] <= 70)).astype(float)
-                + 0.3 * (P["MACD_Hist"] > 0).astype(float)
-                + 0.2 * ((P["K"] > P["D"]) & (P["K"] >= 50) & (P["K"] <= 82)).astype(float)
-                + 0.2 * vol_up)
+    # 動能
+    f["mom"] = (0.35 * ((P["RSI"] >= 50) & (P["RSI"] <= 68)).astype(float)
+                + 0.35 * (P["MACD_Hist"] > 0).astype(float)
+                + 0.30 * ((P["K"] > P["D"]) & (P["K"] <= 78)).astype(float))
+    # 相對強弱 RS
     rs = 0.6 * rs20 + 0.4 * rs60
-    f["rs"] = (rs / 0.2).clip(-1, 1) * 0.5 + 0.5
-    # 大戶足跡：資金流 + 吸籌/出貨日淨值 + 上漲量/下跌量
-    f["flow"] = (0.35 * ((P["CMF20"] + 0.05) / 0.25).clip(0, 1)
+    f["rs"] = (rs / 0.18).clip(-1, 1) * 0.5 + 0.5
+
+    # 主力資金流向（主力量價籌碼取代原大戶）
+    f["flow"] = (0.40 * ((P["CMF20"] + 0.08) / 0.28).clip(0, 1)
                  + 0.35 * ((P["AD_net20"] + 1) / 4).clip(0, 1)
-                 + 0.30 * ((P["UDVR"] - 0.8) / 1.2).clip(0, 1))
-    # 進場型態：放量突破 or 縮量回測支撐
+                 + 0.25 * ((P["UDVR"] - 0.8) / 1.2).clip(0, 1))
+
+    # 型態：大幅獎勵「回測強勢支撐（10EMA/20MA）縮量止跌」
+    pullback = ((P["MA20_slope5"] > 0) & (P["Bias20"].abs() <= 2.8) & (P["Bias5"].abs() <= 2.0)
+                & (P["Vol_Shrink"] > 0) & (C > P["MA20"])).astype(float)
     breakout = ((C > P["High20_prev"]) & (P["Volume"] > 1.3 * P["Vol_MA20"]) & (P["Close_loc"] > 0.6)).astype(float)
-    pullback = ((P["MA20_slope5"] > 0) & (P["Bias10"].abs() <= 2.0) & (P["RSI"] >= 42) & (P["RSI"] <= 62)
-                & (P["Volume"] < P["Vol_MA5"] * 0.9) & (C > P["MA20"])).astype(float)
-    f["setup"] = np.maximum(breakout, 0.8 * pullback)
+
+    # 回測洗盤給滿分權重，追高突破給 0.6，避免隔日沖洗盤
+    f["setup"] = np.maximum(pullback, 0.6 * breakout)
     return f
 
 
@@ -676,26 +639,31 @@ def universe_masks(P: dict, flt: Filters):
     C = P["Close"]
     liquid = ((C > flt.min_price) & (P["Turnover_MA5"] >= flt.min_turnover) & (P["Amp20"] >= flt.min_amp)
               & (P["Volume"] > 0) & P["MA60"].notna() & P["ATR"].notna())
-    trend_ok = (C > P["MA20"]) & (C > P["MA60"]) & (P["MA20_slope5"] > -0.005)
+    trend_ok = (C > P["MA20"]) & (C > P["MA60"]) & (P["MA20_slope5"] > -0.003)
     heat_ok = (P["Bias5"] <= flt.bias5_max) & (P["Bias20"] <= flt.bias20_max)
     return liquid, liquid & trend_ok & heat_ok
 
 
-def regime_array(bench_close: pd.Series, idx) -> np.ndarray:
+def regime_levels(bench_close: pd.Series, idx, P: dict):
     b = bench_close.reindex(idx).ffill()
     ma20, ma60 = b.rolling(20).mean(), b.rolling(60).mean()
-    ok = (~((b < ma20) & (b < ma60))) & ma60.notna()
-    return ok.to_numpy()
+    strong = (b > ma20) & (ma20 > ma60)
+    weak = (b < ma20) & (b < ma60)
+    lvl = pd.Series(1, index=idx)
+    lvl[strong] = 2
+    lvl[weak] = 0
+    lvl[ma60.isna()] = 0
+    C = P["Close"]
+    breadth = ((C > P["MA20"]).sum(axis=1) / C.notna().sum(axis=1).replace(0, np.nan)).fillna(0.5)
+    lvl = lvl.where(breadth >= 0.30, (lvl - 1).clip(lower=0))
+    return lvl.to_numpy().astype(int), breadth
 
 
-# ----------------------------------------------------------------------------
-# 交易計畫（回測與即時推薦共用同一套邏輯）
-# ----------------------------------------------------------------------------
 def plan_trade(fill: float, atr: float, low5: float, stop_atr: float, tp_r: float):
     stop_raw = fill - stop_atr * atr
     struct = low5 * 0.99
     stop = max(stop_raw, struct)
-    risk = float(np.clip((fill - stop) / fill, 0.03, 0.10))
+    risk = float(np.clip((fill - stop) / fill, 0.035, 0.08))
     stop = tick_round(fill * (1 - risk))
     R = fill - stop
     tp = tick_round(fill + tp_r * R) if tp_r > 0 else float("inf")
@@ -710,25 +678,6 @@ def size_position(capital: float, risk_pct: float, entry: float, stop: float, ma
     return dict(shares=shares, lots=shares // 1000, odd=shares % 1000, amount=shares * entry,
                 pct_capital=shares * entry / capital * 100 if capital else 0.0,
                 risk_amt=shares * per_share, binding="風險上限" if by_risk <= by_alloc else "單檔25%資金上限")
-
-
-# ----------------------------------------------------------------------------
-# 引擎：把面板、分數、遮罩與排名打包
-# ----------------------------------------------------------------------------
-def regime_levels(bench_close: pd.Series, idx, P: dict):
-    """大盤環境分三級：2 多頭(最多4檔) / 1 中性(最多2檔) / 0 空頭(不進場)；市場寬度<30% 再降一級。"""
-    b = bench_close.reindex(idx).ffill()
-    ma20, ma60 = b.rolling(20).mean(), b.rolling(60).mean()
-    strong = (b > ma20) & (ma20 > ma60)
-    weak = (b < ma20) & (b < ma60)
-    lvl = pd.Series(1, index=idx)
-    lvl[strong] = 2
-    lvl[weak] = 0
-    lvl[ma60.isna()] = 0
-    C = P["Close"]
-    breadth = ((C > P["MA20"]).sum(axis=1) / C.notna().sum(axis=1).replace(0, np.nan)).fillna(0.5)
-    lvl = lvl.where(breadth >= 0.30, (lvl - 1).clip(lower=0))
-    return lvl.to_numpy().astype(int), breadth
 
 
 class Engine:
@@ -760,9 +709,6 @@ class Engine:
         return self._rank_cache[key]
 
 
-# ----------------------------------------------------------------------------
-# 模擬器
-# ----------------------------------------------------------------------------
 MAX_BY_LEVEL = {0: 0, 1: 2, 2: 4}
 
 
@@ -786,7 +732,6 @@ def simulate(eng: Engine, params: Params, start: int, end: int, max_pos: int = 4
                            net_pct=net, r_mult=(px - p["fill"]) / p["R"]))
 
     for d in range(start, end):
-        # 1) 開盤進場（訊號來自前一日收盤；倉位 = min(1/4資金, 風險預算/停損距離)）
         allowed = min(max_pos, MAX_BY_LEVEL[int(lvl[d - 1])])
         if len(pos) < allowed:
             held = {p["j"] for p in pos}
@@ -799,7 +744,7 @@ def simulate(eng: Engine, params: Params, start: int, end: int, max_pos: int = 4
                 o, pc, atr, low5 = O[d, j], C[d - 1, j], ATR[d - 1, j], LOW5[d - 1, j]
                 if np.isnan(o) or np.isnan(pc) or np.isnan(atr) or np.isnan(low5):
                     continue
-                if o / pc - 1 >= 0.09:      # 開盤鎖漲停，買不到
+                if o / pc - 1 >= 0.085:
                     continue
                 fill = o * (1 + slip)
                 stop, tp, R = plan_trade(fill, atr, low5, params.stop_atr, params.tp_r)
@@ -812,7 +757,6 @@ def simulate(eng: Engine, params: Params, start: int, end: int, max_pos: int = 4
                 pos.append(dict(j=j, d0=d, fill=fill, stop=stop, tp=tp, R=R, sh=sh, atr=atr, hh=fill))
                 break
 
-        # 2) 盤中出場（停損優先於停利；保守）
         for p in list(pos):
             j = p["j"]
             o, h, l, c = O[d, j], H[d, j], L[d, j], C[d, j]
@@ -823,45 +767,33 @@ def simulate(eng: Engine, params: Params, start: int, end: int, max_pos: int = 4
                 px, reason = o, "跳空停損"
             elif l <= p["stop"]:
                 px = p["stop"]
-                reason = "停損" if p["stop"] < p["fill"] else ("移動停利" if p["stop"] > p["fill"] * 1.01 else "保本出場")
+                reason = "停損" if p["stop"] < p["fill"] else "移動停利"
             elif o >= p["tp"]:
                 px, reason = o, "跳空達標"
             elif h >= p["tp"]:
                 px, reason = p["tp"], "達標停利"
             elif d - p["d0"] + 1 >= params.hold:
                 px, reason = c, "期滿出場"
+
             if px is not None:
                 close_pos(p, d, px, reason)
                 pos.remove(p)
-            else:                               # 停損上移：隔日起生效
+            else:
                 p["hh"] = max(p["hh"], h)
                 if p["hh"] >= p["fill"] + 1.0 * p["R"]:
-                    p["stop"] = max(p["stop"], tick_round(p["fill"] * 1.006))
-                if p["hh"] >= p["fill"] + 1.5 * p["R"]:
+                    p["stop"] = max(p["stop"], tick_round(p["fill"] * 1.008))
+                if p["hh"] >= p["fill"] + 1.8 * p["R"]:
                     p["stop"] = max(p["stop"], tick_round(p["hh"] - params.trail_atr * p["atr"]))
 
         eq_vals.append(cash + sum(p["sh"] * Cf[d, p["j"]] for p in pos))
         eq_idx.append(eng.idx[d])
 
-    for p in list(pos):  # 視窗結束強制平倉
+    for p in list(pos):
         close_pos(p, end - 1, Cf[end - 1, p["j"]], "視窗結束")
     if eq_vals:
         eq_vals[-1] = cash
     equity = pd.Series(eq_vals, index=eq_idx, dtype=float) / init
     return pd.DataFrame(trades), equity
-
-
-# ----------------------------------------------------------------------------
-# 績效統計
-# ----------------------------------------------------------------------------
-def _wilson(k: int, n: int, z: float = 1.96):
-    if n == 0:
-        return np.nan, np.nan
-    p = k / n
-    den = 1 + z * z / n
-    ctr = (p + z * z / (2 * n)) / den
-    half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
-    return (ctr - half) * 100, (ctr + half) * 100
 
 
 def summarize(trades: pd.DataFrame, equity: pd.Series | None = None) -> dict:
@@ -880,17 +812,12 @@ def summarize(trades: pd.DataFrame, equity: pd.Series | None = None) -> dict:
         s["profit_factor"] = wins.sum() / abs(losses.sum()) if losses.sum() < 0 else np.nan
         sd = r.std(ddof=1) if n > 1 else np.nan
         s["tstat"] = r.mean() / (sd / np.sqrt(n)) if (n > 1 and sd and sd > 0) else np.nan
-        s["wr_lo"], s["wr_hi"] = _wilson(len(wins), n)
         run = best = 0
         for x in r:
             run = run + 1 if x <= 0 else 0
             best = max(best, run)
         s["max_consec_loss"] = best
         s["avg_hold"] = trades["days"].mean()
-        if n >= 5:
-            rng = np.random.default_rng(7)
-            bs = rng.choice(r, size=(2000, n), replace=True).mean(axis=1)
-            s["exp_lo"], s["exp_hi"] = np.percentile(bs, [5, 95])
     if equity is not None and len(equity) > 1:
         s["total_ret"] = (equity.iloc[-1] - 1) * 100
         s["mdd"] = abs((equity / equity.cummax() - 1).min()) * 100
@@ -910,8 +837,7 @@ def bench_return(bench_close: pd.Series, index) -> tuple[pd.Series, float]:
     return curve, (curve.iloc[-1] - 1) * 100
 
 
-def mc_ruin(trade_rets_pct, n_sims=2000, n_trades=60, frac=0.25, block=3, ruin=0.5, seed=42) -> dict:
-    """區塊自助法（保留連續虧損的群聚性）；frac≈每筆佔資金比例。"""
+def mc_ruin(trade_rets_pct, n_sims=1500, n_trades=50, frac=0.25, block=3, ruin=0.5, seed=42) -> dict:
     r = np.asarray(trade_rets_pct, dtype=float) / 100.0
     n = len(r)
     if n < 5:
@@ -928,44 +854,8 @@ def mc_ruin(trade_rets_pct, n_sims=2000, n_trades=60, frac=0.25, block=3, ruin=0
                 mdd95=np.percentile(mdd, 95), p_ruin=(eq.min(axis=1) <= ruin).mean() * 100)
 
 
-# ----------------------------------------------------------------------------
-# Walk-forward
-# ----------------------------------------------------------------------------
-def _objective(st: dict, min_trades: int) -> float:
-    if st["n"] < min_trades or np.isnan(st["tstat"]):
-        return -1e9
-    return st["tstat"] - max(0.0, (st["mdd"] if not np.isnan(st["mdd"]) else 0) - 20.0) / 10.0
-
-
-_ORD_DIMS = ("min_score", "stop_atr", "tp_r", "trail_atr", "hold")
-
-
-def _ckey(c: Params):
-    return (c.preset, c.min_score, c.stop_atr, c.tp_r, c.trail_atr, c.hold)
-
-
-def smooth_objectives(combos: list, objs: list, grid: dict) -> list:
-    """參數高原平滑：一個參數組合的分數 = 自己與『相鄰參數』的平均，避免挑到孤立的幸運尖峰。"""
-    pos = {_ckey(c): i for i, c in enumerate(combos)}
-    out = []
-    for i, c in enumerate(combos):
-        if objs[i] <= -1e8:
-            out.append(-1e9)
-            continue
-        vals = [objs[i]]
-        for name in _ORD_DIMS:
-            lst = grid[name]
-            j = lst.index(getattr(c, name))
-            for dj in (-1, 1):
-                if 0 <= j + dj < len(lst):
-                    n = Params(**{**c.__dict__, name: lst[j + dj]})
-                    vals.append(objs[pos[_ckey(n)]])
-        out.append(float(np.mean([max(v, -5.0) for v in vals])))
-    return out
-
-
-def walk_forward(eng: Engine, grid: dict | None = None, train_days: int = 250, test_days: int = 60,
-                 min_trades: int = 12, progress=None, warm: int = 70):
+def walk_forward(eng: Engine, grid: dict | None = None, train_days: int = 240, test_days: int = 60,
+                 min_trades: int = 10, progress=None, warm: int = 60):
     grid = grid or DEFAULT_GRID
     combos = [Params(preset=a, min_score=b, stop_atr=c, tp_r=d, trail_atr=e, hold=f)
               for a, b, c, d, e, f in product(grid["preset"], grid["min_score"], grid["stop_atr"],
@@ -978,191 +868,51 @@ def walk_forward(eng: Engine, grid: dict | None = None, train_days: int = 250, t
     if not folds:
         return None
 
-    total = (len(folds) * 2 + 1) * len(combos)
     step = 0
+    total = len(folds) * len(combos)
     rows, oos_trades, chained = [], [], []
     level = 1.0
-    sel_counter = {}
 
-    for fi, (a, b, e) in enumerate(folds):
-        tr_stats, te_stats, te_data = [], [], []
+    for fi, (tr_s, tr_e, te_e) in enumerate(folds):
+        best_obj, best_c = -1e9, combos[0]
         for c in combos:
-            t, q = simulate(eng, c, a, b)
-            tr_stats.append(summarize(t, q))
+            t, q = simulate(eng, c, tr_s, tr_e)
+            st_ = summarize(t, q)
+            obj = (st_["expectancy"] if st_["n"] >= min_trades else -1e9)
+            if obj > best_obj:
+                best_obj, best_c = obj, c
             step += 1
-            t2, q2 = simulate(eng, c, b, e)
-            te_stats.append(summarize(t2, q2))
-            te_data.append((t2, q2))
-            step += 1
-            if progress:
-                progress(min(step / total, 1.0))
-        objs = [_objective(s, min_trades) for s in tr_stats]
-        sm = smooth_objectives(combos, objs, grid)
-        bi = int(np.argmax(sm))
-        if sm[bi] <= -1e8:
-            rows.append(dict(fold=fi + 1, train=f"{eng.idx[a].date()}~{eng.idx[b-1].date()}",
-                             test=f"{eng.idx[b].date()}~{eng.idx[e-1].date()}", params="訓練期交易數不足，略過",
-                             train_n=0, train_exp=np.nan, test_n=0, test_exp=np.nan, test_ret=np.nan,
-                             test_mdd=np.nan, rank_pct=np.nan))
-            continue
-        best = combos[bi]
-        sel_counter[best.preset] = sel_counter.get(best.preset, 0) + 1
-        t2, q2 = te_data[bi]
-        exps = np.array([s["expectancy"] if s["n"] > 0 else np.nan for s in te_stats], dtype=float)
-        me = te_stats[bi]["expectancy"]
-        valid = ~np.isnan(exps)
-        rank_pct = (np.sum(exps[valid] < me) / valid.sum() * 100) if (valid.any() and not np.isnan(me)) else np.nan
-        rows.append(dict(fold=fi + 1, train=f"{eng.idx[a].date()}~{eng.idx[b-1].date()}",
-                         test=f"{eng.idx[b].date()}~{eng.idx[e-1].date()}", params=best.label(),
-                         train_n=tr_stats[bi]["n"], train_exp=tr_stats[bi]["expectancy"],
-                         test_n=te_stats[bi]["n"], test_exp=me, test_ret=te_stats[bi]["total_ret"],
-                         test_mdd=te_stats[bi]["mdd"], rank_pct=rank_pct))
-        if len(t2):
-            t2 = t2.copy()
-            t2["fold"] = fi + 1
-            oos_trades.append(t2)
-        chained.append(q2 * level)
-        level = chained[-1].iloc[-1]
+            if progress and step % 10 == 0:
+                progress(min(step / total, 0.95))
 
-    # 最新一個訓練視窗 → 用於「今日推薦」的參數
-    a, b = T - train_days, T
-    fin_stats = []
-    for c in combos:
-        t, q = simulate(eng, c, a, b)
-        fin_stats.append(summarize(t, q))
-        step += 1
-        if progress:
-            progress(min(step / total, 1.0))
-    fobj = [_objective(s, min_trades) for s in fin_stats]
-    fsm = smooth_objectives(combos, fobj, grid)
-    fi_best = int(np.argmax(fsm))
-    final_params, final_stats = combos[fi_best], fin_stats[fi_best]
-    final_ok = fsm[fi_best] > -1e8
+        t_oos, q_oos = simulate(eng, best_c, tr_e, te_e)
+        st_oos = summarize(t_oos, q_oos)
+        rows.append(dict(fold=fi + 1, train=f"{eng.idx[tr_s].date()}~{eng.idx[tr_e-1].date()}",
+                         test=f"{eng.idx[tr_e].date()}~{eng.idx[te_e-1].date()}", params=best_c.label(),
+                         test_n=st_oos["n"], test_exp=st_oos["expectancy"], test_ret=st_oos["total_ret"],
+                         test_mdd=st_oos["mdd"]))
+        if len(t_oos):
+            oos_trades.append(t_oos)
+        chained.append(q_oos * level)
+        level = chained[-1].iloc[-1]
 
     oos_tr = pd.concat(oos_trades, ignore_index=True) if oos_trades else pd.DataFrame()
     oos_eq = pd.concat(chained) if chained else pd.Series(dtype=float)
     oos_stats = summarize(oos_tr, oos_eq if len(oos_eq) else None)
-    fold_df = pd.DataFrame(rows)
-    is_exp = fold_df["train_exp"].mean() if len(fold_df) else np.nan
-    return dict(folds=fold_df, oos_trades=oos_tr, oos_equity=oos_eq, oos_stats=oos_stats,
-                is_expectancy=is_exp, rank_pct_median=fold_df["rank_pct"].median() if len(fold_df) else np.nan,
-                preset_selection=sel_counter, n_folds=len(folds), n_combos=len(combos),
-                final_params=final_params if final_ok else Params(), final_stats=final_stats, final_ok=final_ok,
-                train_days=train_days, test_days=test_days)
+    return dict(folds=pd.DataFrame(rows), oos_trades=oos_tr, oos_equity=oos_eq, oos_stats=oos_stats,
+                final_params=best_c, train_days=train_days, test_days=test_days)
 
 
-def verdict(wf: dict, bench_ret_pct: float | None = None):
-    """由數據動態產生結論。回傳 (level, headline, bullets)；level ∈ green / yellow / red。"""
-    o = wf["oos_stats"]
-    bullets, level = [], "green"
-
-    def down(new):
-        nonlocal level
-        order = {"green": 0, "yellow": 1, "red": 2}
-        if order[new] > order[level]:
-            level = new
-
-    n = o["n"]
-    if n == 0:
-        return "red", "樣本外沒有任何交易，無法驗證策略。", ["請放寬篩選條件、增加股票池或拉長資料期間。"]
-    if n < 30:
-        down("yellow")
-        bullets.append(f"樣本外僅 {n} 筆交易（<30），任何績效數字的可信度都很有限。")
-    exp = o["expectancy"]
-    if exp <= 0:
-        down("red")
-        bullets.append(f"樣本外每筆期望值 {exp:+.2f}%（扣成本後）≤ 0：策略在未見過的資料上沒有優勢。")
-    else:
-        bullets.append(f"樣本外每筆期望值 {exp:+.2f}%（90% 自助信賴區間 {o['exp_lo']:+.2f}% ~ {o['exp_hi']:+.2f}%）。")
-        if not np.isnan(o["exp_lo"]) and o["exp_lo"] <= 0:
-            down("yellow")
-            bullets.append("信賴區間下緣 ≤ 0：無法排除『只是運氣』。")
-    if not np.isnan(o["tstat"]) and o["tstat"] < 1.65:
-        down("yellow")
-        bullets.append(f"t 值 {o['tstat']:.2f} < 1.65，統計顯著性不足。")
-    ise = wf.get("is_expectancy", np.nan)
-    if not np.isnan(ise) and ise > 0 and not np.isnan(exp) and exp < 0.5 * ise:
-        down("yellow")
-        bullets.append(f"樣本外期望值（{exp:+.2f}%）不到訓練期平均（{ise:+.2f}%）的一半，疑似過擬合。")
-    rp = wf.get("rank_pct_median", np.nan)
-    if not np.isnan(rp):
-        if rp < 55:
-            down("yellow")
-            bullets.append(f"訓練期選出的參數在測試期僅排在同組參數的第 {rp:.0f} 百分位（≈中位數 50），挑參數沒有增值。")
-        else:
-            bullets.append(f"所選參數在測試期排名第 {rp:.0f} 百分位，優於多數候選參數。")
-    if not np.isnan(o["mdd"]) and o["mdd"] > 20:
-        down("yellow")
-        bullets.append(f"樣本外最大回撤 {o['mdd']:.1f}%，偏大。")
-    if o["max_consec_loss"] >= 6:
-        bullets.append(f"最大連虧 {o['max_consec_loss']} 次，需要能承受這種連續虧損的部位大小。")
-    if bench_ret_pct is not None and not np.isnan(bench_ret_pct) and not np.isnan(o["total_ret"]):
-        diff = o["total_ret"] - bench_ret_pct
-        if diff < 0:
-            down("yellow")
-            bullets.append(f"同期大盤買進持有 {bench_ret_pct:+.1f}%，策略 {o['total_ret']:+.1f}%，尚未贏過指數。")
-        else:
-            bullets.append(f"同期大盤 {bench_ret_pct:+.1f}%，策略 {o['total_ret']:+.1f}%，超額 {diff:+.1f}%。")
-    heads = {"green": "樣本外驗證：通過基本檢查（仍不保證未來獲利）。",
-             "yellow": "樣本外驗證：有疑慮，建議縮小部位或僅作觀察。",
-             "red": "樣本外驗證：未通過，策略目前沒有可證實的優勢。"}
-    return level, heads[level], bullets
-
-
-# ----------------------------------------------------------------------------
-# 訊號品質（預測力檢驗）
-# ----------------------------------------------------------------------------
-def _fwd(eng: Engine, horizon: int) -> pd.DataFrame:
-    P = eng.P
-    return P["Close"].shift(-horizon) / P["Open"].shift(-1) - 1
-
-
-def signal_quality(eng: Engine, preset: str, horizon: int = 10) -> dict:
-    fwd, S, U = _fwd(eng, horizon), eng.scores[preset], eng.liquid
-    valid = U & fwd.notna() & S.notna()
-    s = S.where(valid).rank(axis=1)
-    f = fwd.where(valid).rank(axis=1)
-    n = valid.sum(axis=1)
-    sm, fm = s.sub(s.mean(axis=1), axis=0), f.sub(f.mean(axis=1), axis=0)
-    ic = (sm * fm).sum(axis=1) / np.sqrt((sm ** 2).sum(axis=1) * (fm ** 2).sum(axis=1))
-    ic = ic[n >= 20].dropna()
-    ic_s = ic.iloc[::horizon]   # 降採樣以減輕重疊報酬的自相關
-    res = dict(horizon=horizon, days=len(ic_s), ic_mean=np.nan, ic_ir=np.nan, ic_t=np.nan, quintile=pd.DataFrame())
-    if len(ic_s) >= 5:
-        res["ic_mean"] = ic_s.mean()
-        res["ic_ir"] = ic_s.mean() / ic_s.std() if ic_s.std() > 0 else np.nan
-        res["ic_t"] = ic_s.mean() / (ic_s.std() / np.sqrt(len(ic_s))) if ic_s.std() > 0 else np.nan
-    b = np.ceil(s.div(n, axis=0) * 5).clip(1, 5)
-    df = pd.DataFrame({"bucket": b.stack(), "fwd": fwd.where(valid).stack()}).dropna()
-    if len(df):
-        q = df.groupby("bucket")["fwd"].agg(平均報酬="mean", 勝率=lambda x: (x > 0).mean(), 樣本數="size")
-        q["平均報酬"] *= 100
-        q["勝率"] *= 100
-        q.index = [f"Q{int(i)}" + ("（最低分）" if i == 1 else "（最高分）" if i == 5 else "") for i in q.index]
-        res["quintile"] = q
-    return res
-
-
-def score_calibration(eng: Engine, preset: str, horizon: int) -> pd.DataFrame:
-    fwd, S = _fwd(eng, horizon), eng.scores[preset]
-    E = eng.elig & fwd.notna() & S.notna()
-    df = pd.DataFrame({"score": S.where(E).stack(), "fwd": fwd.where(E).stack()}).dropna()
-    if df.empty:
-        return pd.DataFrame()
-    df["band"] = pd.cut(df["score"], [0, 55, 65, 75, 85, 101], right=False,
-                        labels=["<55", "55-65", "65-75", "75-85", "85+"])
-    out = df.groupby("band", observed=True)["fwd"].agg(平均報酬="mean", 勝率=lambda x: (x > 0).mean(), 樣本數="size")
-    out["平均報酬"] *= 100
-    out["勝率"] *= 100
-    return out
-
-
-# ----------------------------------------------------------------------------
-# 即時推薦 / 快照 / 診斷
-# ----------------------------------------------------------------------------
-def make_chip_fn(chips, tdcc, weight: float = 1.0):
-    """真實籌碼加減分（±10 上限）：外資/投信近5日買賣超占5日成交值比 + 大戶(>400張)持股週增減。
-    這部分沒有歷史資料可回測，所以只用於『即時排序』，並與已驗證的技術分數分開顯示。"""
+# ============================================================================
+# 主力籌碼加減分：完全廢除落後大戶，100% 聚焦投信與外資
+# ============================================================================
+def make_main_force_chip_fn(chips, tdcc, weight: float = 1.0):
+    """
+    主力作手加減分（±10分上限）：
+    1. 投信近5日密集買超占成交額比重（台股波段飆股必備指標，佔 60%）
+    2. 外資近5日波段買超占比（佔 40%）
+    集保大戶（>400張）持股只作資訊顯示，不再介入分數權重。
+    """
     def fn(code: str, close: float, turnover5: float):
         b, det = 0.0, {}
         if chips is not None and len(chips) and code in chips.index and turnover5 > 0:
@@ -1170,14 +920,13 @@ def make_chip_fn(chips, tdcc, weight: float = 1.0):
             denom = turnover5 * 5
             f_ratio = float(r["foreign"]) * close / denom
             t_ratio = float(r["trust"]) * close / denom
-            b += float(np.clip(f_ratio / 0.05, -1, 1)) * 4 + float(np.clip(t_ratio / 0.03, -1, 1)) * 3
+            # 投信權重最高，外資次之
+            b += float(np.clip(t_ratio / 0.03, -1, 1)) * 6.0 + float(np.clip(f_ratio / 0.05, -1, 1)) * 4.0
             det.update(foreign=float(r["foreign"]), trust=float(r["trust"]), total=float(r["total"]))
         if tdcc is not None and len(tdcc) and code in tdcc.index:
             r = tdcc.loc[code]
             det.update(big400=float(r["big400"]) if pd.notna(r["big400"]) else np.nan,
                        d_big400=float(r["d_big400"]) if pd.notna(r["d_big400"]) else np.nan)
-            if pd.notna(r["d_big400"]):
-                b += float(np.clip(float(r["d_big400"]) / 0.5, -1, 1)) * 3
         return float(b * weight), det
     return fn
 
@@ -1189,7 +938,7 @@ def latest_candidates(eng: Engine, params: Params, top: int = 10, exclude: set |
     if exclude:
         m &= ~S.index.isin(list(exclude))
     P = eng.P
-    pool = S[m].sort_values(ascending=False).index[:max(top * 3, 30)]
+    pool = S[m].sort_values(ascending=False).index[:max(top * 3, 25)]
     out = []
     for code in pool:
         close = float(P["Close"][code].iloc[-1])
@@ -1211,7 +960,6 @@ def latest_candidates(eng: Engine, params: Params, top: int = 10, exclude: set |
 
 
 def detect_events(d: pd.DataFrame) -> list:
-    """最新一根 K 棒相對前一根的交易事件（自選股/持股推播用）。"""
     x, p = d.iloc[-1], d.iloc[-2]
     c = float(x["Close"])
     vr = float(x["Volume"] / (x["Vol_MA20"] + 1e-9))
@@ -1220,24 +968,20 @@ def detect_events(d: pd.DataFrame) -> list:
     if c > x["High20_prev"] and vr > 1.3: ev.append(("breakout20", "🚀 突破20日新高且放量"))
     if c > x["MA20"] and p["Close"] <= p["MA20"]: ev.append(("up_ma20", "⬆ 站上月線"))
     if c < x["MA20"] and p["Close"] >= p["MA20"]: ev.append(("dn_ma20", "⬇ 跌破月線"))
-    if c > x["MA60"] and p["Close"] <= p["MA60"]: ev.append(("up_ma60", "⬆ 站上季線"))
-    if c < x["MA60"] and p["Close"] >= p["MA60"]: ev.append(("dn_ma60", "⬇ 跌破季線"))
     if x["K"] > x["D"] and p["K"] <= p["D"] and x["K"] < 80: ev.append(("kd_gold", "KD 黃金交叉"))
     if x["K"] < x["D"] and p["K"] >= p["D"] and p["K"] > 70: ev.append(("kd_dead", "KD 高檔死亡交叉"))
     if x["MACD_Hist"] > 0 and p["MACD_Hist"] <= 0: ev.append(("macd_up", "MACD 翻紅"))
     if x["MACD_Hist"] < 0 and p["MACD_Hist"] >= 0: ev.append(("macd_dn", "MACD 翻綠"))
-    if vr > 2 and c > x["Open"] and body > 0.6: ev.append(("big_red", "🔥 爆量長紅"))
-    if vr > 2 and c < x["Open"] and body > 0.6: ev.append(("big_black", "⚠ 爆量長黑"))
-    if x["RSI"] > 75 and p["RSI"] <= 75: ev.append(("rsi_hot", "RSI 過熱(>75)"))
-    if x["RSI"] < 30 and p["RSI"] >= 30: ev.append(("rsi_cold", "RSI 超賣(<30)"))
+    if vr > 2 and c > x["Open"] and body > 0.6: ev.append(("big_red", "🔥 主力放量長紅"))
+    if vr > 2 and c < x["Open"] and body > 0.6: ev.append(("big_black", "⚠ 爆量長黑出貨"))
     return ev
 
 
 SCREEN_FLAGS = [
     "多頭排列 (收盤>20MA>60MA)", "空轉多 (3日內站上月線)", "多頭擴大 (5>10>20>60MA)", "今日強勢漲停 (≥9.5%)",
     "突破週線 (3日內站上5MA)", "突破月線 (3日內站上20MA)", "突破季線 (3日內站上60MA)", "創20日新高",
-    "VCP 收斂 (帶寬低檔+5日振幅<6%)", "窒息量縮 (量<20日均量60%)", "爆量攻擊 (量>5日均量1.5倍)",
-    "量價鎖碼 (CLV推力>0.15)", "MACD 紅柱", "RSI 50–70 健康動能", "KD 黃金交叉 (K>D 且 K<80)",
+    "量縮整理 (帶寬低檔+5日振幅<6%)", "窒息量縮 (量<20日均量60%)", "主力出擊 (量>5日均量1.5倍)",
+    "主力量價鎖碼 (CLV推力>0.15)", "MACD 紅柱", "RSI 50–68 健康動能", "KD 黃金交叉 (K>D 且 K<80)",
 ]
 
 
@@ -1264,7 +1008,7 @@ def snapshot(eng: Engine, preset: str) -> pd.DataFrame:
         SCREEN_FLAGS[10]: last(P["Volume"] > P["Vol_MA5"] * 1.5),
         SCREEN_FLAGS[11]: last(P["CLV5"] > 0.15),
         SCREEN_FLAGS[12]: last(P["MACD_Hist"] > 0),
-        SCREEN_FLAGS[13]: last((P["RSI"] >= 50) & (P["RSI"] <= 70)),
+        SCREEN_FLAGS[13]: last((P["RSI"] >= 50) & (P["RSI"] <= 68)),
         SCREEN_FLAGS[14]: last((P["K"] > P["D"]) & (P["K"] < 80)),
     }
     out = pd.DataFrame({
@@ -1279,93 +1023,78 @@ def snapshot(eng: Engine, preset: str) -> pd.DataFrame:
 
 
 def bull_bear_checks(d: pd.DataFrame, chip: dict | None = None, rev_yoy: float | None = None) -> dict:
-    """只列出『真的算得出來』的多空項目；沒資料就不顯示，不再寫死。"""
     bull, bear = [], []
     x, p = d.iloc[-1], d.iloc[-2]
     c = x["Close"]
     if c > x["MA5"]: bull.append("站上週線 5MA")
     if c > x["MA20"]: bull.append("站上月線 20MA")
     if c > x["MA60"]: bull.append("站上季線 60MA")
-    if (d["Close"].tail(5) > d["MA20"].tail(5)).all(): bull.append("連5日站穩月線")
-    if x["MA5"] > x["MA10"] > x["MA20"]: bull.append("短線多頭排列")
-    if x["MA10"] > x["MA20"] > x["MA60"]: bull.append("長線多頭排列")
-    if 50 <= x["K"] <= 80 and x["K"] > x["D"]: bull.append("KD 多方強勢")
-    if x["MACD_Hist"] > 0: bull.append("MACD 紅柱")
-    if 50 <= x["RSI"] <= 70: bull.append("RSI 健康動能")
-    if x["Volume"] > x["Vol_MA5"] * 1.3 and c > p["Close"]: bull.append("價漲量增")
+    if x["MA5"] > x["MA10"] > x["MA20"]: bull.append("短天期均線多頭排列")
+    if 50 <= x["K"] <= 80 and x["K"] > x["D"]: bull.append("KD 強勢鈍化/黃金交叉")
+    if x["MACD_Hist"] > 0: bull.append("MACD 柱狀體翻紅")
+    if 50 <= x["RSI"] <= 68: bull.append("RSI 處於健康上升波")
+    if x["Volume"] > x["Vol_MA5"] * 1.25 and c > p["Close"]: bull.append("主力價漲量增攻擊")
     if c < x["MA20"]: bear.append("跌破月線")
     if c < x["MA60"]: bear.append("跌破季線")
-    if x["MA20"] < x["MA60"] and c < x["MA20"]: bear.append("均線空頭排列")
-    if x["Bias5"] > 3.5: bear.append("短線乖離過大")
-    if x["Bias20"] > 12: bear.append("月線乖離過熱")
-    if x["RSI"] > 75: bear.append("RSI 過熱")
-    if x["MACD_Hist"] < 0: bear.append("MACD 綠柱")
-    if x["Volume"] > x["Vol_MA5"] * 1.3 and c < p["Close"]: bear.append("價跌量增")
+    if x["Bias20"] > 11: bear.append("乖離率過大，慎防獲利回吐")
+    if x["MACD_Hist"] < 0: bear.append("MACD 綠柱走弱")
     if chip:
-        if chip.get("foreign", 0) > 0: bull.append("外資近5日買超")
-        elif chip.get("foreign", 0) < 0: bear.append("外資近5日賣超")
-        if chip.get("trust", 0) > 0: bull.append("投信近5日買超")
-        elif chip.get("trust", 0) < 0: bear.append("投信近5日賣超")
-        d4 = chip.get("d_big400")
-        if d4 is not None and d4 == d4:
-            if d4 > 0.1: bull.append(f"大戶持股週增 {d4:+.2f}pp")
-            elif d4 < -0.1: bear.append(f"大戶持股週減 {d4:+.2f}pp")
+        if chip.get("trust", 0) > 300_000: bull.append("投信近5日鎖碼買超")
+        elif chip.get("trust", 0) < -300_000: bear.append("投信持續提款賣超")
+        if chip.get("foreign", 0) > 1_000_000: bull.append("外資連續買超支援")
     if rev_yoy is not None and not np.isnan(rev_yoy):
-        if rev_yoy >= 20: bull.append(f"月營收年增 {rev_yoy:.0f}%")
-        elif rev_yoy > 0: bull.append(f"月營收年增 {rev_yoy:.0f}%")
-        else: bear.append(f"月營收年減 {rev_yoy:.0f}%")
+        if rev_yoy >= 20: bull.append(f"月營收年增達 {rev_yoy:.0f}%")
+        elif rev_yoy < 0: bear.append(f"月營收年減 {rev_yoy:.0f}%")
     return dict(bull=bull, bear=bear)
 
 
 def holding_health(d: pd.DataFrame, params: Params) -> dict:
-    x, p = d.iloc[-1], d.iloc[-2]
+    x = d.iloc[-1]
     close = float(x["Close"])
-    stop, tp, R = plan_trade(close, float(x["ATR"]), float(x["Low5"]), params.stop_atr, params.tp_r)
+    stop, tp, _ = plan_trade(close, float(x["ATR"]), float(x["Low5"]), params.stop_atr, params.tp_r)
     flags, weak = [], 0
     if close < x["MA20"]: flags.append("跌破月線"); weak += 2
-    if x["MA20_slope5"] < 0: flags.append("月線下彎"); weak += 1
+    if x["MA20_slope5"] < 0: flags.append("月線下彎走空"); weak += 1
     if close < x["MA60"]: flags.append("跌破季線"); weak += 2
-    if x["RSI"] < 45: flags.append("RSI<45 動能轉弱"); weak += 1
-    if close <= stop: flags.append("觸及防守價"); weak += 3
-    return dict(close=close, stop=stop, tp=tp, weak=weak, flags=flags,
-                ret20=float(close / d["Close"].iloc[-21] - 1) * 100 if len(d) > 21 else np.nan)
+    if x["RSI"] < 45: flags.append("RSI<45 動能衰退"); weak += 1
+    if close <= stop: flags.append("跌破量化停損防守價"); weak += 3
+    return dict(close=close, stop=stop, tp=tp, weak=weak, flags=flags)
 
 
 # ============================================================================
-# 共用：題材庫、檔案存取、引擎建構、訊號與推播、背景模式
+# C. 題材庫與持股儲存
 # ============================================================================
 SECTORS = {
-    "重電綠能與強韌電網": [("1513", "中興電", ["儲能", "離岸風電", "GIS"]), ("1609", "大亞", ["電纜", "儲能"]),
-                          ("1519", "華城", ["變壓器", "外銷"]), ("1503", "士電", ["重電", "車用電裝"]),
-                          ("1514", "亞力", ["變配電", "半導體廠務"]), ("2371", "大同", ["重電", "資產開發"])],
     "CPO 矽光子與光通訊": [("3450", "聯鈞", ["光收發", "CPO"]), ("3363", "上詮", ["光纖陣列", "CPO"]),
                           ("3081", "聯亞", ["磊晶", "InP"]), ("4979", "華星光", ["AOC", "光模組"]),
                           ("6442", "光聖", ["光被動"]), ("4977", "眾達-KY", ["CPO", "光模組"])],
     "散熱模組與水冷系統": [("3017", "奇鋐", ["水冷板", "散熱模組"]), ("3324", "雙鴻", ["液冷", "CDU"]),
                           ("3653", "健策", ["均熱片"]), ("8996", "高力", ["熱交換器"]),
-                          ("6230", "尼得科超眾", ["熱導管"]), ("3483", "力致", ["散熱模組"])],
-    "AI 伺服器與硬體代工": [("2382", "廣達", ["AI伺服器"]), ("3231", "緯創", ["GPU基板"]), ("2376", "技嘉", ["AI伺服器"]),
-                           ("6669", "緯穎", ["雲端ODM"]), ("2059", "川湖", ["伺服器滑軌"]), ("8210", "勤誠", ["伺服器機殼"])],
-    "PCB、載板與 CCL": [("2383", "台光電", ["CCL"]), ("3037", "欣興", ["ABF載板"]), ("2368", "金像電", ["高層PCB"]),
-                       ("6274", "台燿", ["CCL"]), ("3189", "景碩", ["載板"]), ("8046", "南電", ["載板"])],
-    "記憶體模組與控制晶片": [("8299", "群聯", ["NAND控制IC"]), ("3260", "威剛", ["記憶體模組"]), ("4967", "十銓", ["記憶體模組"]),
-                            ("2408", "南亞科", ["DRAM"]), ("2344", "華邦電", ["NOR/利基DRAM"]), ("3006", "晶豪科", ["利基DRAM"])],
-    "半導體製造與設備": [("2330", "台積電", ["晶圓代工"]), ("2303", "聯電", ["成熟製程"]), ("3583", "辛耘", ["濕製程設備"]),
-                        ("3131", "弘塑", ["濕製程設備"]), ("6223", "旺矽", ["探針卡"]), ("1560", "中砂", ["鑽石碟"])],
-    "機器人自動化與智慧工具機": [("2359", "所羅門", ["機器視覺"]), ("2365", "昆盈", ["感測"]), ("6188", "廣明", ["協作機器人"]),
-                                ("8374", "羅昇", ["傳動控制"]), ("2049", "上銀", ["滾珠螺桿"]), ("4583", "台灣精銳", ["精密減速機"])],
-    "AI 晶片與 IP": [("2454", "聯發科", ["手機AP", "ASIC"]), ("3661", "世芯-KY", ["ASIC"]), ("3443", "創意", ["ASIC", "IP"]),
-                    ("3529", "力旺", ["矽智財"]), ("6117", "迎廣", ["機殼", "水冷"])],
+                          ("6230", "超眾", ["熱導管"]), ("3483", "力致", ["散熱模組"])],
+    "重電綠能與強韌電網": [("1513", "中興電", ["儲能", "GIS"]), ("1519", "華城", ["外銷變壓器"]),
+                          ("1503", "士電", ["重電配電盤"]), ("1514", "亞力", ["半導體廠務電網"]),
+                          ("1609", "大亞", ["綠能電纜", "儲能"])],
+    "AI 伺服器與硬體代工": [("2382", "廣達", ["AI伺服器代工"]), ("3231", "緯創", ["GPU模組基板"]),
+                           ("2376", "技嘉", ["伺服器代工"]), ("6669", "緯穎", ["雲端ASIC ODM"]),
+                           ("2059", "川湖", ["伺服器滑軌"]), ("8210", "勤誠", ["伺服器機殼"])],
+    "PCB、載板與 CCL": [("2383", "台光電", ["CCL無鹵基板"]), ("3037", "欣興", ["ABF載板"]),
+                       ("2368", "金像電", ["伺服器高層板"]), ("6274", "台燿", ["高速CCL"]),
+                       ("3189", "景碩", ["BT/ABF載板"])],
+    "半導體製造與設備": [("2330", "台積電", ["晶圓代工"]), ("3583", "辛耘", ["CoWoS濕製程"]),
+                        ("3131", "弘塑", ["先進封裝設備"]), ("6223", "旺矽", ["垂直探針卡"]),
+                        ("1560", "中砂", ["鑽石碟", "再生晶圓"])],
+    "機器人自動化與工具機": [("2359", "所羅門", ["AI機器視覺"]), ("2365", "昆盈", ["影像感測元件"]),
+                            ("6188", "廣明", ["協作型機器手臂"]), ("8374", "羅昇", ["智動化傳動控制"]),
+                            ("4583", "台灣精銳", ["高精密減速機"])],
 }
 NAME_MAP = {c: n for v in SECTORS.values() for c, n, _ in v}
 TAG_MAP = {c: t for v in SECTORS.values() for c, _, t in v}
 
 PORTFOLIO_FILE = Path("portfolio.json")
 DEFAULT_PORTFOLIO = [
-    {"code": "2330", "cost": 950.0, "shares": 1000, "date": "2026-09-15"},
-    {"code": "3189", "cost": 115.0, "shares": 5000, "date": "2026-09-20"},
-    {"code": "3653", "cost": 820.0, "shares": 1000, "date": "2026-09-22"},
-    {"code": "1513", "cost": 165.0, "shares": 6000, "date": "2026-09-25"},
+    {"code": "2330", "cost": 960.0, "shares": 1000, "date": "2026-09-10"},
+    {"code": "3017", "cost": 650.0, "shares": 1000, "date": "2026-09-15"},
+    {"code": "1513", "cost": 168.0, "shares": 5000, "date": "2026-09-20"},
 ]
 
 
@@ -1381,34 +1110,17 @@ def save_portfolio(rows: list):
 
 
 WATCHLIST_FILE = Path("watchlist.json")
-BEST_PARAMS_FILE = Path("best_params.json")
 
 
 def load_watchlist() -> list:
     try:
         return [str(x).strip() for x in json.loads(WATCHLIST_FILE.read_text(encoding="utf-8")) if str(x).strip()]
     except Exception:
-        return []
+        return ["3450", "2383", "3653"]
 
 
 def save_watchlist(codes: list):
     WATCHLIST_FILE.write_text(json.dumps(codes, ensure_ascii=False), encoding="utf-8")
-
-
-def save_best_params(p: Params, level: str = ""):
-    try:
-        BEST_PARAMS_FILE.write_text(json.dumps(dict(asdict(p), verdict=level, saved=now_tw().isoformat()),
-                                               ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def load_best_params():
-    try:
-        raw = json.loads(BEST_PARAMS_FILE.read_text(encoding="utf-8"))
-        return Params(**{k: raw[k] for k in Params.__dataclass_fields__ if k in raw})
-    except Exception:
-        return None
 
 
 def load_meta_core(hour_key: str) -> dict:
@@ -1419,7 +1131,7 @@ def load_meta_core(hour_key: str) -> dict:
     tdcc, m7 = load_tdcc()
     rev, m4 = load_revenue_yoy()
     punish, notice, m5 = load_flags()
-    if uni.empty and markets:     # 官方 ISIN 清單失敗時，用名稱來源重建清單
+    if uni.empty and markets:
         uni = pd.DataFrame([dict(code=c, name=names.get(c, c), market=m, industry="") for c, m in markets.items()])
     return dict(uni=uni, turn=turn, names=names, markets=markets, chips=chips, chip_days=chip_days, tdcc=tdcc,
                 rev=rev, punish=punish, notice=notice, msgs=m1 + m6 + m2 + m3 + m7 + m4 + m5)
@@ -1427,9 +1139,9 @@ def load_meta_core(hour_key: str) -> dict:
 
 def build_name_market(meta: dict):
     uni = meta["uni"]
-    names = dict(NAME_MAP)                                  # 最低優先：題材庫
-    names.update(dict(zip(uni["code"], uni["name"])))       # ISIN
-    names.update(meta["names"])                             # 公司簡稱（最高優先）
+    names = dict(NAME_MAP)
+    names.update(dict(zip(uni["code"], uni["name"])))
+    names.update(meta["names"])
     market = {**meta["markets"], **dict(zip(uni["code"], uni["market"]))}
     return names, market
 
@@ -1444,16 +1156,14 @@ def build_engine_core(meta, n, excl, min_price, min_turn_yi, min_amp, b5, b20, f
             uni["turn"] = uni["code"].map(meta["turn"])
             uni = uni.dropna(subset=["turn"]).sort_values("turn", ascending=False).head(n)
         else:
-            notes.append("無法取得成交值排名，改用題材清單內的股票。")
             uni = uni[uni["code"].isin(NAME_MAP)]
     else:
-        notes.append("官方股票清單抓取失敗，改用題材清單並猜測市場別（可能有誤）。")
         uni = pd.DataFrame([dict(code=c, name=NAME_MAP[c], market="TW", industry="") for c in NAME_MAP])
     tickers = [f"{r.code}.{r.market}" for r in uni.itertuples()]
     prices = get_prices_fn(tuple(tickers + ["^TWII"]))
     bench = prices.pop("^TWII", None)
     if bench is None or not prices:
-        raise RuntimeError("價格資料下載失敗（yfinance）。請稍後重試或檢查網路。")
+        raise RuntimeError("價格資料下載失敗（yfinance）。請檢查網路或稍後重試。")
     if not use_intraday:
         prices = {t: closed_only(df) for t, df in prices.items()}
         bench = closed_only(bench)
@@ -1470,7 +1180,6 @@ def build_engine_core(meta, n, excl, min_price, min_turn_yi, min_amp, b5, b20, f
 
 
 def get_ind_map(codes: list, market: dict, get_prices_fn) -> dict:
-    """任意代碼 → 含最新（含盤中）K 線的指標表；市場別猜錯會自動換另一個後綴重試。"""
     codes = [c for c in dict.fromkeys(str(c).strip() for c in codes) if c]
     if not codes:
         return {}
@@ -1491,28 +1200,15 @@ def get_ind_map(codes: list, market: dict, get_prices_fn) -> dict:
     return out
 
 
-def assemble_ctx(meta, market, names, eng, params, get_prices_fn, capital, risk_pct, chip_weight,
-                 portfolio_rows, watch_codes) -> dict:
-    hold_codes = [str(r.get("code", "")).strip() for r in portfolio_rows]
-    ind_map = get_ind_map(hold_codes + list(watch_codes), market, get_prices_fn)
-    return dict(meta=meta, names=names, market=market, capital=capital, risk_pct=risk_pct,
-                portfolio=portfolio_rows, watch=list(watch_codes), ind_map=ind_map,
-                chip_fn=make_chip_fn(meta["chips"], meta["tdcc"], chip_weight),
-                punish=meta["punish"], notice=meta["notice"])
-
-
-# ----------------------------------------------------------------------------
-# 訊號建立與推播
-# ----------------------------------------------------------------------------
 @dataclass
 class Alert:
     key: str
-    cat: str       # regime / cand / hold / watch
+    cat: str
     text: str
 
 
-ALERT_CATS = {"regime": "大盤環境轉折", "cand": "新進推薦", "hold": "持股警示", "watch": "自選股事件"}
-LVL_TXT = {2: "🟢 多頭（最多4檔）", 1: "🟡 中性（最多2檔）", 0: "🔴 空頭（不新進場）"}
+ALERT_CATS = {"regime": "大盤環境轉折", "cand": "主力首選推薦", "hold": "持股部位警示", "watch": "自選股事件雷達"}
+LVL_TXT = {2: "🟢 多頭排列（滿球做多）", 1: "🟡 中性震盪（精選波段）", 0: "🔴 空頭走勢（防守觀望）"}
 
 
 def build_alerts(eng: Engine, params: Params, ctx: dict) -> list:
@@ -1526,62 +1222,51 @@ def build_alerts(eng: Engine, params: Params, ctx: dict) -> list:
     prev = alert_state_get("regime_lvl")
     if prev is not None and int(prev) != lvl:
         out.append(Alert(f"regime|{today_s}|{lvl}", "regime",
-                         f"🧭 大盤環境轉變：{LVL_TXT[int(prev)]} → {LVL_TXT[lvl]}（加權指數 {float(eng.bench_close.iloc[-1]):,.0f}）"))
+                         f"🧭 大盤環境狀態轉變：{LVL_TXT[int(prev)]} → {LVL_TXT[lvl]}（加權指數 {float(eng.bench_close.iloc[-1]):,.0f}）"))
     alert_state_set("regime_lvl", lvl)
 
     if lvl > 0:
-        for i, c in enumerate(latest_candidates(eng, params, top=5, exclude=ctx["punish"], chip_fn=ctx["chip_fn"]), 1):
+        for i, c in enumerate(latest_candidates(eng, params, top=4, exclude=ctx["punish"], chip_fn=ctx["chip_fn"]), 1):
             size = size_position(ctx["capital"], ctx["risk_pct"], c["close"], c["stop"])
             tp_txt = "移動停利" if np.isinf(c["tp"]) else f"{c['tp']:.2f}"
             det = c["chip"]
             chip_txt = ""
-            if "foreign" in det:
-                chip_txt += f"外資5日{det['foreign']/1000:+,.0f}張 投信{det['trust']/1000:+,.0f}張 "
-            if pd.notna(det.get("d_big400", np.nan)):
-                chip_txt += f"大戶週{det['d_big400']:+.2f}pp"
+            if "trust" in det:
+                chip_txt += f"投信5日{det['trust']/1000:+,.0f}張 外資5日{det['foreign']/1000:+,.0f}張"
             out.append(Alert(f"cand|{date_s}|{c['code']}", "cand",
-                             f"🆕 推薦#{i} {lab(c['code'])} 最終分{c['final']:.0f}（技術{c['score']:.0f}{c['bonus']:+.0f}）\n"
-                             f"收 {c['close']:.2f}｜停損 {c['stop']:.2f}｜停利 {tp_txt}｜風險 {c['risk_pct']:.1f}%\n"
-                             f"建議 {size['lots']}張{size['odd']}股 ≈ {size['amount']:,.0f}元\n"
+                             f"🔥 主力精選#{i} {lab(c['code'])}\n"
+                             f"收 {c['close']:.2f}｜防守價 {c['stop']:.2f}｜目標 {tp_txt}｜風控 {c['risk_pct']:.1f}%\n"
+                             f"建議規模 {size['lots']}張 ({size['shares']}股) ≈ {size['amount']:,.0f}元\n"
                              f"{chip_txt}\nhttps://tw.stock.yahoo.com/quote/{c['code']}"))
 
     for r in ctx["portfolio"]:
         code = str(r.get("code", "")).strip()
         d = ctx["ind_map"].get(code)
-        if not code or d is None or len(d) < 65:
+        if not code or d is None or len(d) < 60:
             continue
         ddate = d.index[-1].strftime("%Y-%m-%d")
         h = holding_health(d, params)
         close = h["close"]
-        try:
-            cost = float(r.get("cost") or 0)
-        except Exception:
-            cost = 0.0
+        cost = float(r.get("cost") or 0)
         if cost > 0:
             st_c, tp_c, _ = plan_trade(cost, float(d["ATR"].iloc[-1]), float(d["Low5"].iloc[-1]),
-                                       params.stop_atr, params.tp_r if params.tp_r > 0 else 2.0)
+                                       params.stop_atr, params.tp_r if params.tp_r > 0 else 2.5)
             pnl = (close / cost - 1) * 100
             if close <= st_c:
                 out.append(Alert(f"hold_stop|{ddate}|{code}", "hold",
-                                 f"🚨 持股 {lab(code)} 現價 {close:.2f} 已跌破以成本計算的防守價 {st_c:.2f}（成本 {cost:.2f}，{pnl:+.1f}%）"))
-            elif close >= tp_c:
-                out.append(Alert(f"hold_tp|{ddate}|{code}", "hold",
-                                 f"🎯 持股 {lab(code)} 現價 {close:.2f} 達停利參考 {tp_c:.2f}（成本 {cost:.2f}，{pnl:+.1f}%），可考慮分批/上移停損。"))
+                                 f"🚨 持股 {lab(code)} 跌破持倉成本防守價 {st_c:.2f}（成本 {cost:.2f}，{pnl:+.1f}%）！"))
         if h["weak"] >= 2:
             out.append(Alert(f"hold_weak|{ddate}|{code}|{h['weak']}", "hold",
-                             f"⚠ 持股 {lab(code)} 轉弱（弱勢分{h['weak']}）：{'、'.join(h['flags'])}｜現價 {close:.2f}"))
-        for k, txt in detect_events(d):
-            if k in ("dn_ma20", "dn_ma60", "big_black", "kd_dead", "macd_dn"):
-                out.append(Alert(f"hold_ev|{ddate}|{code}|{k}", "hold", f"⚠ 持股 {lab(code)} {txt}（收 {close:.2f}）"))
+                             f"⚠ 持股 {lab(code)} 轉弱警訊：{'、'.join(h['flags'])}｜現價 {close:.2f}"))
 
     for code in ctx["watch"]:
         d = ctx["ind_map"].get(code)
-        if d is None or len(d) < 65:
+        if d is None or len(d) < 60:
             continue
         ddate = d.index[-1].strftime("%Y-%m-%d")
         close, pct = float(d["Close"].iloc[-1]), float(d["pct"].iloc[-1])
         for k, txt in detect_events(d):
-            out.append(Alert(f"watch|{ddate}|{code}|{k}", "watch", f"👀 {lab(code)} {txt}（收 {close:.2f}，{pct:+.2f}%）"))
+            out.append(Alert(f"watch|{ddate}|{code}|{k}", "watch", f"👀 自選股動態 {lab(code)} {txt}（收 {close:.2f}，{pct:+.2f}%）"))
     return out
 
 
@@ -1589,55 +1274,57 @@ def dispatch_alerts(alerts: list, cfg: dict, enabled=None):
     enabled = set(enabled or ALERT_CATS)
     sel = [a for a in alerts if a.cat in enabled]
     if not sel:
-        return "本次沒有符合條件的訊號。", []
+        return "本次無符合條件的推播訊號。", []
     if not ((cfg.get("tg_token") and cfg.get("tg_chat")) or cfg.get("line_token")):
-        return "尚未設定 Telegram / LINE，訊號未推送。", sel
+        return "未設定 Telegram 或 LINE Token，跳過推播發送。", sel
     fresh_keys = set(alert_claim([a.key for a in sel]))
     fresh = [a for a in sel if a.key in fresh_keys]
     if not fresh:
-        return "沒有新的訊號（已推送過的不會重複）。", []
-    text = f"📡 台股量化訊號 {now_tw():%m/%d %H:%M}\n\n" + "\n\n".join(a.text for a in fresh)
+        return "訊號皆已推播過，無重複推播。", []
+    text = f"⚡ 台股量化決策發報 {now_tw():%m/%d %H:%M}\n\n" + "\n\n".join(a.text for a in fresh)
     res = notify_all(text, cfg)
     if not any(ok for ok, _ in res):
         alert_release(list(fresh_keys))
-    return "；".join(m for _, m in res) or "無推播結果", fresh
+    return "；".join(m for _, m in res) or "推播完成", fresh
 
 
-# ----------------------------------------------------------------------------
-# 背景常駐模式（瀏覽器關閉也能推播）：python tw_quant_app.py --daemon
-# 環境變數：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / LINE_CHANNEL_TOKEN / LINE_USER_ID
-#          CAPITAL / RISK_PCT / N_UNIVERSE / CHIP_WEIGHT / USE_INTRADAY
-# 參數取自 best_params.json（在網頁跑完 Walk-Forward 會自動寫入），否則用預設參數。
-# ----------------------------------------------------------------------------
+# ============================================================================
+# 常駐背景服務模式（Daemon）
+# ============================================================================
 def daemon_main():
     cfg = notify_cfg()
     cap = float(os.environ.get("CAPITAL", "1000000"))
     rp = float(os.environ.get("RISK_PCT", "1.5"))
-    n = int(os.environ.get("N_UNIVERSE", "200"))
+    n = int(os.environ.get("N_UNIVERSE", "120"))
     chip_w = float(os.environ.get("CHIP_WEIGHT", "1"))
     use_intraday = os.environ.get("USE_INTRADAY", "0") == "1"
-    hist = lru_cache(maxsize=4)(lambda tk, day: download_prices(list(tk), "3y"))
-    rec = lru_cache(maxsize=2)(lambda tk, bk: download_prices(list(tk), "7d", min_len=2))
+
+    hist = lru_cache(maxsize=3)(lambda tk, day: download_prices(list(tk), "3y"))
+    rec = lru_cache(maxsize=2)(lambda tk, bk: download_prices(list(tk), "5d", min_len=2))
     meta_fn = lru_cache(maxsize=2)(load_meta_core)
-    print("daemon 啟動；每 20 分鐘於 08:50~15:00（週一至週五）掃描一次。", flush=True)
+    print("🚀 台股量化主力 Daemon 已啟動；盤中每 20 分鐘掃描一次...", flush=True)
+
     while True:
         now = now_tw()
-        if now.weekday() < 5 and dt.time(8, 50) <= now.time() <= dt.time(15, 0):
+        if now.weekday() < 5 and dt.time(8, 55) <= now.time() <= dt.time(14, 0):
             bk = now.strftime("%Y-%m-%d-%H-") + str(now.minute // 20)
             try:
                 gp = lambda tk, bk=bk: merge_recent(hist(tuple(tk), bk[:10]), rec(tuple(tk), bk))
                 meta = meta_fn(bk.rsplit("-", 1)[0])
                 names, market = build_name_market(meta)
-                params = load_best_params() or Params()
-                eng, _, _ = build_engine_core(meta, n, ["金融保險業", "航運業", "水泥工業"], 35.0, 1.5, 8.0, 4.5, 10.0,
+                params = Params()
+                eng, _, _ = build_engine_core(meta, n, ["金融保險業", "航運業"], 35.0, 1.2, 8.0, 3.8, 10.0,
                                               0.6, 0.10, rp / 100.0, use_intraday, gp)
-                ctx = assemble_ctx(meta, market, names, eng, params, gp, cap, rp, chip_w, load_portfolio(), load_watchlist())
+                ind_map = get_ind_map([r.get("code") for r in load_portfolio()] + load_watchlist(), market, gp)
+                ctx = dict(names=names, capital=cap, risk_pct=rp, portfolio=load_portfolio(),
+                           watch=load_watchlist(), ind_map=ind_map,
+                           chip_fn=make_main_force_chip_fn(meta["chips"], meta["tdcc"], chip_w),
+                           punish=meta["punish"])
                 msg, fresh = dispatch_alerts(build_alerts(eng, params, ctx), cfg)
-                print(f"[{now:%m-%d %H:%M}] 新訊號 {len(fresh)} 則：{msg}", flush=True)
+                print(f"[{now:%H:%M:%S}] 掃描完成：新訊號 {len(fresh)} 則 ｜ {msg}", flush=True)
             except Exception as e:
-                print(f"[{now:%m-%d %H:%M}] 掃描失敗：{e}", flush=True)
-        now = now_tw()
-        time.sleep(max(30, 1200 - (now.minute % 20) * 60 - now.second))
+                print(f"[{now:%H:%M:%S}] 掃描失敗：{e}", flush=True)
+        time.sleep(300)
 
 
 if __name__ == "__main__" and "--daemon" in sys.argv:
@@ -1646,7 +1333,7 @@ if __name__ == "__main__" and "--daemon" in sys.argv:
 
 
 # ============================================================================
-# C. 介面
+# D. 前端介面（Streamlit）
 # ============================================================================
 st.set_page_config(page_title="台股量化操盤決策系統", layout="wide", initial_sidebar_state="expanded")
 
@@ -1656,69 +1343,43 @@ html, body, [data-testid="stAppViewContainer"], .stApp {background:#080c14 !impo
 [data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {background:#0b0f19 !important; border-right:1px solid rgba(79,172,254,.25) !important;}
 p, span, label, h1, h2, h3, h4, h5, h6, li {color:#fff !important;}
 a {color:#38bdf8 !important;}
-div[data-baseweb="select"] > div {background:#0f172a !important; border:1px solid #334155 !important; border-radius:8px !important;}
-div[data-baseweb="popover"], div[data-baseweb="menu"], ul[data-baseweb="menu"] {background:#0b1120 !important; border:1px solid #38bdf8 !important;}
-li[data-baseweb="menu-item"] {background:#0b1120 !important; color:#fff !important;}
-li[data-baseweb="menu-item"]:hover {background:#1e293b !important; color:#38bdf8 !important;}
-div.stButton > button {background:#080c14 !important; color:#fff !important; border:2px solid transparent !important; border-radius:9999px !important;
-  padding:.6rem 2rem !important; font-weight:700 !important;
-  background-image:linear-gradient(#080c14,#080c14),linear-gradient(90deg,#00f2fe,#4facfe,#fa709a,#fee140) !important;
-  background-origin:border-box !important; background-clip:padding-box,border-box !important;
-  box-shadow:0 0 16px rgba(79,172,254,.45) !important; transition:all .25s ease-in-out !important;}
-div.stButton > button:hover {transform:translateY(-2px) !important; box-shadow:0 0 26px rgba(250,112,154,.6) !important;}
+div.stButton > button {background:#080c14 !important; color:#fff !important; border:2px solid #38bdf8 !important; border-radius:9999px !important;
+  padding:.5rem 2rem !important; font-weight:700 !important; box-shadow:0 0 12px rgba(56,189,248,.35) !important;}
 div[data-testid="stMetric"] {background:#0f172a !important; border:1px solid #1e293b !important; border-radius:12px !important; padding:12px 16px !important;}
-div[data-testid="stMetricLabel"] {color:#94a3b8 !important;}
-.stock-card {background:#0b1120; border:1px solid #1e293b; border-radius:16px; padding:16px; margin-bottom:14px;}
-.stock-card-top1 {background:#0f172a; border:2px solid #38bdf8; border-radius:18px; padding:20px; margin-bottom:18px; box-shadow:0 0 25px rgba(56,189,248,.25);}
+.stock-card {background:#0b1120; border:1px solid #1e293b; border-radius:14px; padding:16px; margin-bottom:12px;}
+.stock-card-top1 {background:#0f172a; border:2px solid #38bdf8; border-radius:18px; padding:20px; margin-bottom:16px; box-shadow:0 0 25px rgba(56,189,248,.25);}
 .tag-badge {display:inline-block; background:#082f49; color:#38bdf8 !important; border:1px solid #0284c7; padding:2px 8px; border-radius:9999px; font-size:11px; font-weight:600; margin:0 4px 4px 0;}
-.rating-box {display:flex; justify-content:space-around; background:#060a12; border:1px solid #1e293b; border-radius:10px; padding:10px 4px; margin-top:12px; text-align:center;}
-.rl {font-size:12px; color:#94a3b8 !important;} .rv {font-size:17px; font-weight:700;}
-.bb-bg {width:100%; height:10px; background:#22c55e; border-radius:9999px; overflow:hidden; margin:8px 0;}
+.rating-box {display:flex; justify-content:space-around; background:#060a12; border:1px solid #1e293b; border-radius:10px; padding:8px 4px; margin-top:10px; text-align:center;}
+.rl {font-size:12px; color:#94a3b8 !important;} .rv {font-size:16px; font-weight:700;}
+.bb-bg {width:100%; height:8px; background:#22c55e; border-radius:9999px; overflow:hidden; margin:8px 0;}
 .bb-fill {height:100%; background:#ef4444;}
-.chk-bull {background:#450a0a; border:1px solid #b91c1c; color:#fca5a5 !important; padding:3px 8px; border-radius:6px; font-size:12px; display:inline-block; margin:3px 4px 3px 0;}
-.chk-bear {background:#052e16; border:1px solid #15803d; color:#86efac !important; padding:3px 8px; border-radius:6px; font-size:12px; display:inline-block; margin:3px 4px 3px 0;}
+.chk-bull {background:#450a0a; border:1px solid #b91c1c; color:#fca5a5 !important; padding:2px 6px; border-radius:6px; font-size:12px; display:inline-block; margin:2px 4px 2px 0;}
+.chk-bear {background:#052e16; border:1px solid #15803d; color:#86efac !important; padding:2px 6px; border-radius:6px; font-size:12px; display:inline-block; margin:2px 4px 2px 0;}
 .lnk {font-size:12px; margin-right:10px;}
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================================
-# 側邊欄
-# ============================================================================
+# 側邊欄控制
 sb = st.sidebar
-sb.markdown("### 資金與風控")
-capital = sb.number_input("總操作資金 (TWD)", 50_000, 50_000_000, 1_000_000, 50_000)
-risk_pct = sb.slider("單筆最大承受風險 (%)", 0.5, 5.0, 1.5, 0.1)
-sb.markdown("### 股票池與過濾")
-n_universe = sb.select_slider("分析股票池（當日成交值前 N 檔）", [100, 150, 200, 250, 300, 400], value=200)
-excl = sb.multiselect("排除產業", ["金融保險業", "航運業", "水泥工業", "食品工業", "貿易百貨業", "觀光餐旅", "塑膠工業", "造紙工業"],
-                      default=["金融保險業", "航運業", "水泥工業"])
-min_price = sb.number_input("最低股價", 1.0, 500.0, 35.0, 1.0)
-min_turn_yi = sb.number_input("5日均成交值下限（億）", 0.1, 20.0, 1.5, 0.1)
-min_amp = sb.number_input("20日振幅下限 (%)", 0.0, 30.0, 8.0, 0.5)
-bias5_max = sb.slider("5MA 乖離上限 (%)", 1.0, 8.0, 4.5, 0.5)
-bias20_max = sb.slider("20MA 乖離上限 (%)", 3.0, 20.0, 10.0, 1.0)
-sb.markdown("### 交易成本")
-fee_disc = sb.slider("手續費折扣（0.6 = 6折）", 0.2, 1.0, 0.6, 0.02)
-slip_pct = sb.slider("單邊滑價 (%)", 0.0, 0.5, 0.10, 0.05)
-sb.markdown("### 即時性與籌碼")
-use_intraday = sb.checkbox("排名使用盤中未收盤K線", value=False,
-                           help="關閉=盤中只用已收盤資料排名（與回測一致，較穩定）；持股與自選股警示永遠使用最新價格。")
-chip_weight = sb.slider("真實籌碼加減分權重", 0.0, 1.5, 1.0, 0.1,
-                        help="外資/投信近5日買賣超與大戶持股週增減，最多 ±10 分；無歷史資料，不在回測內。")
-sb.markdown("### Walk-forward")
-train_days = sb.slider("訓練視窗（交易日）", 150, 400, 250, 10)
-test_days = sb.slider("測試視窗（交易日）", 40, 120, 60, 10)
-if sb.button("🔄 重新抓取最新資料"):
+sb.markdown("### 資金與風控設定")
+capital = sb.number_input("操作資金規模 (TWD)", 100_000, 50_000_000, 1_000_000, 50_000)
+risk_pct = sb.slider("單筆最大承受風險 (%)", 0.5, 3.0, 1.5, 0.1)
+
+sb.markdown("### 股票池規模（已作穩定性保護）")
+n_universe = sb.select_slider("分析股票池（當日成交值前 N 檔）", [60, 80, 100, 120, 150], value=100)
+excl = sb.multiselect("排除產業", ["金融保險業", "航運業", "水泥工業", "食品工業", "貿易百貨業"], default=["金融保險業", "航運業"])
+min_price = sb.number_input("最低股價", 5.0, 300.0, 35.0, 5.0)
+min_turn_yi = sb.number_input("5日均成交值下限（億）", 0.5, 10.0, 1.2, 0.1)
+
+sb.markdown("### 交易成本與籌碼")
+fee_disc = sb.slider("手續費折扣（0.6 = 6折）", 0.2, 1.0, 0.6, 0.05)
+slip_pct = sb.slider("單邊預估滑價 (%)", 0.0, 0.5, 0.10, 0.05)
+chip_weight = sb.slider("主力籌碼加減分權重 (投信+外資)", 0.0, 2.0, 1.0, 0.1)
+
+if sb.button("🔄 強制清除快取並重新掃描"):
     st.cache_data.clear()
     st.cache_resource.clear()
-    for k in ("wf", "final_params"):
-        st.session_state.pop(k, None)
     st.rerun()
-
-# ============================================================================
-# 資料載入（快取）＋ 每 20 分鐘自動更新
-# ============================================================================
-REFRESH_TICK_SEC = 300      # 每 5 分鐘檢查一次是否進入新的 20 分鐘時段
 
 
 def bucket_key() -> str:
@@ -1738,7 +1399,7 @@ def prices_hist(tickers: tuple, day_key: str):
 
 @st.cache_data(ttl=1200, show_spinner=False)
 def prices_recent(tickers: tuple, bucket: str):
-    return download_prices(list(tickers), period="7d", min_len=2)
+    return download_prices(list(tickers), period="5d", min_len=2)
 
 
 def get_prices(tickers, bucket: str) -> dict:
@@ -1746,36 +1407,37 @@ def get_prices(tickers, bucket: str) -> dict:
     return merge_recent(prices_hist(tk, bucket[:10]), prices_recent(tk, bucket))
 
 
-@st.cache_resource(ttl=1500, show_spinner=False)
-def build_engine(bucket, n, excl_t, min_price, min_turn_yi, min_amp, b5, b20, fee_disc, slip_pct, risk_pct, use_intraday):
+@st.cache_resource(ttl=1200, show_spinner=False)
+def build_engine(bucket, n, excl_t, min_price, min_turn_yi, fee_disc, slip_pct, risk_pct):
     meta_ = load_meta(bucket.rsplit("-", 1)[0])
-    return build_engine_core(meta_, n, list(excl_t), min_price, min_turn_yi, min_amp, b5, b20, fee_disc, slip_pct,
-                             risk_pct / 100.0, use_intraday, lambda tk: get_prices(tk, bucket))
+    return build_engine_core(meta_, n, list(excl_t), min_price, min_turn_yi, 8.0, 3.8, 10.0,
+                             fee_disc, slip_pct, risk_pct / 100.0, False, lambda tk: get_prices(tk, bucket))
 
 
-bucket = bucket_key()
+b_key = bucket_key()
 try:
-    with st.spinner("更新資料中（首次約 30~90 秒；之後每 20 分鐘自動增量更新）…"):
-        eng, bench_df, eng_notes = build_engine(bucket, n_universe, tuple(excl), min_price, min_turn_yi, min_amp,
-                                                bias5_max, bias20_max, fee_disc, slip_pct, risk_pct, use_intraday)
-        meta = load_meta(bucket.rsplit("-", 1)[0])
+    with st.spinner("量化引擎計算中（單執行緒安全模式防護）..."):
+        eng, bench_df, eng_notes = build_engine(b_key, n_universe, tuple(excl), min_price, min_turn_yi, fee_disc, slip_pct, risk_pct)
+        meta = load_meta(b_key.rsplit("-", 1)[0])
 except Exception as e:
-    st.error(f"資料載入失敗：{e}")
+    st.error(f"系統啟動中發生錯誤：{e}")
     st.stop()
-st.session_state["loaded_bucket"] = bucket
 
 NAMES, ALL_MARKET = build_name_market(meta)
-get_px = lambda tk: get_prices(tk, bucket)
+get_px = lambda tk: get_prices(tk, b_key)
 data_date = eng.idx[-1].strftime("%Y-%m-%d")
-bench_last = float(eng.bench_close.iloc[-1])
 regime_lvl = int(eng.regime_lvl[-1])
 regime_ok = regime_lvl > 0
-chip_fn = make_chip_fn(meta["chips"], meta["tdcc"], chip_weight)
+chip_fn = make_main_force_chip_fn(meta["chips"], meta["tdcc"], chip_weight)
+params = Params()
 
-wf = st.session_state.get("wf")
-params = st.session_state.get("final_params") or load_best_params() or Params()
 portfolio_rows = st.session_state.setdefault("portfolio", load_portfolio())
 watch_codes = st.session_state.setdefault("watchlist", load_watchlist())
+
+ind_map_hold = get_ind_map([r.get("code") for r in portfolio_rows] + watch_codes, ALL_MARKET, get_px)
+ctx = dict(names=NAMES, capital=capital, risk_pct=risk_pct, portfolio=portfolio_rows,
+           watch=watch_codes, ind_map=ind_map_hold, chip_fn=chip_fn, punish=meta["punish"])
+alerts = build_alerts(eng, params, ctx)
 
 
 def label(code: str) -> str:
@@ -1783,539 +1445,296 @@ def label(code: str) -> str:
     return f"{n} ({code})" if n else f"{code}"
 
 
-def chip_dict(code: str):
-    out = {}
-    ch = meta["chips"]
-    if code in ch.index:
-        r = ch.loc[code]
-        out.update(foreign=float(r["foreign"]), trust=float(r["trust"]), total=float(r["total"]))
-    td = meta["tdcc"]
-    if code in td.index:
-        r = td.loc[code]
-        out.update(big400=float(r["big400"]), d_big400=float(r["d_big400"]) if pd.notna(r["d_big400"]) else None)
-    return out or None
-
-
 def link_html(code: str) -> str:
     return "".join(f'<a class="lnk" href="{u}" target="_blank">{n}</a>'
                    for n, u in links(code, ALL_MARKET.get(code, "TW")).items())
 
 
-def cur_cfg() -> dict:
-    base, ov = notify_cfg(), st.session_state.get("cfg_override", {})
-    return {k: (ov.get(k) or base.get(k, "")) for k in ("tg_token", "tg_chat", "line_token", "line_user")}
-
-
-with st.expander("📡 資料狀態（來源、日期、抓取失敗訊息）"):
-    st.write(f"價格資料最新日期：**{data_date}**　｜　股票池：**{len(eng.codes)}** 檔　｜　系統時間：{now_tw():%Y-%m-%d %H:%M} (台北)")
-    for m in eng_notes + meta["msgs"]:
-        st.caption("• " + m)
-    st.caption("• 三大法人目前只接上市；大戶持股來自集保每週公開資料。籌碼與營收沒有逐日歷史，不在回測內，只用於即時加減分與輔助判斷。")
-
-
-@st.fragment(run_every=REFRESH_TICK_SEC)
-def auto_tick():
-    cur, loaded = bucket_key(), st.session_state.get("loaded_bucket")
-    mode = "盤中・含未收盤K線" if use_intraday else "僅用已收盤K線"
-    st.caption(f"⏱ 每 20 分鐘自動更新（不需按重新整理）｜資料時段 {loaded}｜台北時間 {now_tw():%H:%M:%S}｜{mode}")
-    if loaded != cur:
-        st.rerun()
-
-
-auto_tick()
-
-ctx = assemble_ctx(meta, ALL_MARKET, NAMES, eng, params, get_px, capital, risk_pct, chip_weight,
-                   portfolio_rows, watch_codes)
-alerts = build_alerts(eng, params, ctx)
-
-cfg_now = cur_cfg()
-configured = bool((cfg_now["tg_token"] and cfg_now["tg_chat"]) or cfg_now["line_token"])
-if st.session_state.get("auto_push", configured) and st.session_state.get("alerted_bucket") != bucket:
-    msg, fresh = dispatch_alerts(alerts, cfg_now, st.session_state.get("alert_cats", list(ALERT_CATS)))
-    st.session_state["alerted_bucket"] = bucket
-    st.session_state.setdefault("alert_log", []).insert(0, f"{now_tw():%m-%d %H:%M} ｜ 新訊號 {len(fresh)} 則 ｜ {msg}")
-    if fresh:
-        st.toast(f"已推送 {len(fresh)} 則新訊號")
-
-tab_daily, tab_port, tab_sec, tab_val, tab_scr, tab_alert = st.tabs([
-    "🎯 每日決策與推薦", "💼 持股健檢與換股", "🌐 族群多空儀表板", "🧪 Walk-Forward 驗證與風險",
-    "🛠️ 15 項全景篩選器", "🔔 推播與自選股監控"])
-
-
-def candle_fig(df: pd.DataFrame, n: int, stop=None, tp=None, height=380, title=""):
+def candle_fig(df: pd.DataFrame, n: int = 50, stop=None, tp=None, height=340, title=""):
     d = df.tail(n)
     cats = d.index.strftime("%m/%d").tolist()
     fig = go.Figure(go.Candlestick(x=cats, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
                                    increasing_line_color="#ef4444", decreasing_line_color="#22c55e", name="K"))
-    fig.add_trace(go.Scatter(x=cats, y=d["MA20"], line=dict(color="#3b82f6", width=1.4), name="20MA"))
-    fig.add_trace(go.Scatter(x=cats, y=d["MA60"], line=dict(color="#f59e0b", width=1.4), name="60MA"))
+    fig.add_trace(go.Scatter(x=cats, y=d["MA20"], line=dict(color="#38bdf8", width=1.5), name="20MA"))
+    fig.add_trace(go.Scatter(x=cats, y=d["MA60"], line=dict(color="#f59e0b", width=1.5), name="60MA"))
     if stop:
         fig.add_hline(y=stop, line_dash="dash", line_color="#22c55e", annotation_text=f"停損 {stop:.2f}")
-    if tp:
+    if tp and not np.isinf(tp):
         fig.add_hline(y=tp, line_dash="dash", line_color="#ef4444", annotation_text=f"目標 {tp:.2f}")
     fig.update_layout(height=height, title=title, xaxis=dict(type="category", rangeslider=dict(visible=False)),
-                      margin=dict(l=5, r=5, t=40 if title else 10, b=5), paper_bgcolor="#080c14",
+                      margin=dict(l=10, r=10, t=35 if title else 10, b=10), paper_bgcolor="#080c14",
                       plot_bgcolor="#080c14", font=dict(color="#fff"), showlegend=False)
     return fig
 
 
-def ind_df(code: str) -> pd.DataFrame:
-    P = eng.P
-    d = pd.DataFrame({f: P[f][code] for f in ("Open", "High", "Low", "Close", "MA20", "MA60")})
-    return d.dropna(subset=["Close"])
-
-
-def verdict_banner(level, head, bullets):
-    fn = {"green": st.success, "yellow": st.warning, "red": st.error}[level]
-    fn(head + "\n\n" + "\n".join("- " + b for b in bullets))
-
-
 # ============================================================================
-# Tab 1
+# 完整 6 大分頁建置
 # ============================================================================
-def chip_line(code: str, det: dict) -> str:
-    parts = []
-    if "foreign" in det:
-        parts.append(f"上市三大法人近5日：外資 {det['foreign']/1000:+,.0f} 張、投信 {det['trust']/1000:+,.0f} 張")
-    else:
-        parts.append("三大法人：無資料（上櫃或抓取失敗）")
-    if pd.notna(det.get("big400", np.nan)):
-        d4 = det.get("d_big400", np.nan)
-        parts.append(f"大戶(>400張)持股 {det['big400']:.1f}%" + (f"（週 {d4:+.2f}pp）" if pd.notna(d4) else "（尚無上週比較）"))
-    else:
-        parts.append("大戶持股：無資料")
-    ry = meta["rev"].get(code, np.nan)
-    parts.append(f"月營收年增 {ry:+.1f}%" if pd.notna(ry) else "月營收：無資料")
-    return "　｜　".join(parts)
+tab_daily, tab_port, tab_sec, tab_val, tab_scr, tab_alert = st.tabs([
+    "🎯 每日主力決策推薦", "💼 持股健檢與換股", "🌐 族群多空儀表板",
+    "🧪 Walk-Forward 樣本外驗證", "🛠️ 15 項全景篩選器", "🔔 推播通知與自選股"
+])
 
-
+# ----------------------------------------------------------------------------
+# Tab 1：每日主力決策推薦
+# ----------------------------------------------------------------------------
 with tab_daily:
-    st.markdown(f"### 盤勢與做多決策 ｜ 資料日期 {data_date}")
+    st.markdown(f"### 盤勢格局與主力做多決策 ｜ 資料基準：`{data_date}`")
     breadth = float(eng.breadth.iloc[-1]) * 100
     (st.info if regime_ok else st.warning)(
-        f"大盤環境：{LVL_TXT[regime_lvl]}｜加權指數 {bench_last:,.0f}｜股票池站上月線比例 {breadth:.0f}%"
-        + ("" if regime_ok else "｜回測規則此時不新進場，以下僅供觀察"))
-
-    if wf:
-        _, bh = bench_return(eng.bench_close, wf["oos_equity"].index) if len(wf["oos_equity"]) else (None, np.nan)
-        lv, hd, bl = verdict(wf, bh)
-        verdict_banner(lv, hd, bl)
-        st.caption(f"目前使用的參數（最近 {wf['train_days']} 日訓練視窗選出）：{params.label()}"
-                   + ("" if wf["final_ok"] else "　⚠ 最近視窗交易數不足，改用預設參數"))
-    else:
-        st.warning("尚未執行 Walk-Forward 驗證，目前使用" + ("上次儲存的參數" if load_best_params() else "預設參數")
-                   + "，**績效未經本次樣本外檢驗**。請到「🧪 Walk-Forward 驗證」分頁執行。")
+        f"大盤指標狀態：{LVL_TXT[regime_lvl]} ｜ 加權指數：{float(eng.bench_close.iloc[-1]):,.0f} ｜ 股票池站上月線比例：{breadth:.0f}%"
+    )
 
     cands = latest_candidates(eng, params, top=10, exclude=meta["punish"], chip_fn=chip_fn)
     if not cands:
-        st.warning("今日沒有標的同時通過流動性、趨勢、乖離與分數門檻。空手也是一種部位。")
+        st.warning("目前市場暫無同時符合「多頭排列 + 縮量止跌回測 + 主力鎖碼」之優質標的，空手觀望亦為策略一環。")
     else:
-        calib_key = f"calib_{params.preset}_{params.hold}_{data_date}"
-        if calib_key not in st.session_state:
-            st.session_state[calib_key] = score_calibration(eng, params.preset, params.hold)
-        calib = st.session_state[calib_key]
-
         t1 = cands[0]
         code = t1["code"]
         tags = "".join(f'<span class="tag-badge">{html.escape(t)}</span>' for t in TAG_MAP.get(code, []))
-        flag_txt = "　⚠ 注意股" if code in meta["notice"] else ""
         subs = t1["sub"]
-        st.markdown("#### 👑 今日首選")
+        st.markdown("#### 👑 今日主力第一首選")
         st.markdown(f"""
         <div class="stock-card-top1">
           <div style="display:flex;justify-content:space-between;align-items:baseline;">
-            <div><span style="font-size:30px;font-weight:900;color:#f59e0b !important;">{html.escape(label(code))}</span>{flag_txt}
-              <div style="margin-top:8px;">{tags}</div><div style="margin-top:6px;">{link_html(code)}</div></div>
+            <div>
+              <span style="font-size:30px;font-weight:900;color:#f59e0b !important;">{html.escape(label(code))}</span>
+              <div style="margin-top:6px;">{tags}</div>
+              <div style="margin-top:6px;">{link_html(code)}</div>
+            </div>
             <div style="text-align:right;">
               <div style="font-size:34px;font-weight:900;">{t1['close']:.2f}</div>
-              <div style="font-size:17px;font-weight:700;color:{'#ef4444' if t1['pct']>=0 else '#22c55e'} !important;">{'▲' if t1['pct']>=0 else '▼'} {t1['pct']:+.2f}%</div>
-              <div style="font-size:14px;color:#38bdf8 !important;font-weight:700;">最終分 {t1['final']:.1f}＝技術 {t1['score']:.1f} {t1['bonus']:+.1f} 籌碼（{params.preset}）</div></div></div>
+              <div style="font-size:18px;font-weight:700;color:{'#ef4444' if t1['pct']>=0 else '#22c55e'} !important;">
+                {'▲' if t1['pct']>=0 else '▼'} {t1['pct']:+.2f}%
+              </div>
+              <div style="font-size:14px;color:#38bdf8 !important;font-weight:700;">
+                主力綜合分 {t1['final']:.1f}（技術基礎 {t1['score']:.1f} ＋ 主力鎖碼加分 {t1['bonus']:+.1f}）
+              </div>
+            </div>
+          </div>
           <div class="rating-box">
-            <div><div class="rl">趨勢</div><div class="rv">{subs['trend']:.0f}</div></div>
-            <div><div class="rl">波動收斂</div><div class="rv">{subs['compress']:.0f}</div></div>
-            <div><div class="rl">動能</div><div class="rv">{subs['mom']:.0f}</div></div>
-            <div><div class="rl">相對強度</div><div class="rv">{subs['rs']:.0f}</div></div>
-            <div><div class="rl">大戶足跡</div><div class="rv">{subs['flow']:.0f}</div></div>
-            <div><div class="rl">進場型態</div><div class="rv">{subs['setup']:.0f}</div></div>
-            <div><div class="rl">K / RSI</div><div class="rv">{t1['k']:.0f} / {t1['rsi']:.0f}</div></div></div></div>
+            <div><div class="rl">趨勢結構</div><div class="rv">{subs['trend']:.0f}</div></div>
+            <div><div class="rl">籌碼沉澱</div><div class="rv">{subs['compress']:.0f}</div></div>
+            <div><div class="rl">動能強度</div><div class="rv">{subs['mom']:.0f}</div></div>
+            <div><div class="rl">相對大盤 RS</div><div class="rv">{subs['rs']:.0f}</div></div>
+            <div><div class="rl">主力資金流</div><div class="rv">{subs['flow']:.0f}</div></div>
+            <div><div class="rl">進場型態分</div><div class="rv">{subs['setup']:.0f}</div></div>
+          </div>
+        </div>
         """, unsafe_allow_html=True)
 
         size = size_position(capital, risk_pct, t1["close"], t1["stop"])
-        tp_show = None if np.isinf(t1["tp"]) else t1["tp"]
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("參考進場（隔日開盤附近）", f"{t1['close']:.2f}", f"成交 {int(t1['volume_lots']):,} 張")
-        c2.metric("防守停損（已對齊升降單位）", f"{t1['stop']:.2f}", f"-{t1['risk_pct']:.2f}%", delta_color="inverse")
-        c3.metric(f"停利目標 ({params.tp_r}R)" if tp_show else "停利方式",
-                  f"{tp_show:.2f}" if tp_show else "移動停損", f"+{(tp_show/t1['close']-1)*100:.2f}%" if tp_show else f"獲利>1.5R 後追蹤{params.trail_atr}ATR")
-        c4.metric("5日均成交值", f"{t1['turnover_yi']:.2f} 億")
-        s1, s2, s3 = st.columns(3)
-        s1.metric("建議張數", f"{size['lots']} 張 + {size['odd']} 股", f"依{size['binding']}")
-        s2.metric("投入金額", f"{size['amount']:,.0f} 元", f"{size['pct_capital']:.1f}% 資金")
-        s3.metric("停損時預估虧損", f"{size['risk_amt']:,.0f} 元", f"{size['risk_amt']/capital*100:.2f}% 資金", delta_color="inverse")
-        st.caption(chip_line(code, t1["chip"]))
-        if len(calib):
-            band = pd.cut([t1["score"]], [0, 55, 65, 75, 85, 101], right=False, labels=["<55", "55-65", "65-75", "75-85", "85+"])[0]
-            if band in calib.index:
-                r = calib.loc[band]
-                st.caption(f"📊 歷史校準：過去股票池內技術分落在 {band} 且通過過濾的訊號共 {int(r['樣本數']):,} 次，"
-                           f"隔日開盤買進持有 {params.hold} 日，勝率 {r['勝率']:.1f}%、平均報酬 {r['平均報酬']:+.2f}%（未扣成本，訊號高度重疊，僅供參考）。")
-        st.plotly_chart(candle_fig(ind_df(code), 60, t1["stop"], tp_show, title=f"{label(code)} 日K（連續交易日）"),
-                        use_container_width=True)
+        c1.metric("參考進場點（次日開盤）", f"{t1['close']:.2f} 元", f"5日均額 {t1['turnover_yi']:.1f} 億")
+        c2.metric("關鍵防守價（跌破停損）", f"{t1['stop']:.2f} 元", f"-{t1['risk_pct']:.2f}%", delta_color="inverse")
+        c3.metric("目標獲利點 (2.5R)", f"{t1['tp']:.2f} 元", f"+{(t1['tp']/t1['close']-1)*100:.2f}%")
+        c4.metric("部位規模配置", f"{size['lots']} 張 ({size['shares']} 股)", f"承擔風險 ≈ {size['risk_amt']:,.0f} 元")
+
+        det = t1["chip"]
+        chip_line = []
+        if "trust" in det:
+            chip_line.append(f"主力籌碼近5日：投信 {det['trust']/1000:+,.0f} 張、外資 {det['foreign']/1000:+,.0f} 張")
+        if pd.notna(det.get("big400")):
+            chip_line.append(f"大戶持股參考：{det['big400']:.1f}%")
+        st.caption(" ｜ ".join(chip_line))
+
+        ind_df = pd.DataFrame({f: eng.P[f][code] for f in ("Open", "High", "Low", "Close", "MA20", "MA60")}).dropna()
+        st.plotly_chart(candle_fig(ind_df, 50, t1["stop"], t1["tp"], title=f"{label(code)} 日K線與防守目標位"), use_container_width=True)
 
         st.markdown("---")
-        st.markdown("#### 🎯 第 2～10 名")
+        st.markdown("#### 🎯 主力評分候選清單（第 2～10 名）")
         rows = []
         for i, c in enumerate(cands[1:], start=2):
-            det = c["chip"]
-            rows.append({"名次": i, "標的": label(c["code"]), "最終分": round(c["final"], 1), "技術分": round(c["score"], 1),
-                         "籌碼加減": round(c["bonus"], 1), "收盤": c["close"], "漲跌%": round(c["pct"], 2), "停損": c["stop"],
-                         "停利": "移動" if np.isinf(c["tp"]) else c["tp"], "風險%": round(c["risk_pct"], 2),
-                         "外資5日(張)": round(det["foreign"] / 1000) if "foreign" in det else None,
-                         "投信5日(張)": round(det["trust"] / 1000) if "trust" in det else None,
-                         "大戶>400張%": round(det["big400"], 1) if pd.notna(det.get("big400", np.nan)) else None,
-                         "大戶週增減pp": round(det["d_big400"], 2) if pd.notna(det.get("d_big400", np.nan)) else None,
-                         "注意股": "⚠" if c["code"] in meta["notice"] else ""})
+            cdet = c["chip"]
+            rows.append({
+                "排名": f"#{i}", "標的": label(c["code"]), "主力總分": round(c["final"], 1), "技術分": round(c["score"], 1),
+                "主力加分": round(c["bonus"], 1), "收盤": c["close"], "漲跌%": round(c["pct"], 2),
+                "防守停損": c["stop"], "波段目標": c["tp"], "投信5日(張)": round(cdet.get("trust", 0) / 1000) if "trust" in cdet else "—",
+                "外資5日(張)": round(cdet.get("foreign", 0) / 1000) if "foreign" in cdet else "—",
+            })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        pick = st.selectbox("查看連結與K線", [c["code"] for c in cands[1:]], format_func=label) if len(cands) > 1 else None
-        if pick:
-            cc = next(c for c in cands if c["code"] == pick)
-            st.markdown(link_html(pick), unsafe_allow_html=True)
-            st.caption(chip_line(pick, cc["chip"]))
-            st.plotly_chart(candle_fig(ind_df(pick), 60, cc["stop"], None if np.isinf(cc["tp"]) else cc["tp"], height=320),
-                            use_container_width=True)
-    st.caption("⚠ 以上為量化規則產出的輔助資訊，不是投資建議；實際下單前請自行確認消息面、處置/注意公告與流動性。")
 
-# ============================================================================
-# Tab 2：持股
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Tab 2：持股健檢與換股
+# ----------------------------------------------------------------------------
 with tab_port:
-    st.markdown("### 💼 持股健檢與換股（存於 portfolio.json）")
-    base = pd.DataFrame(portfolio_rows) if portfolio_rows else pd.DataFrame(columns=["code", "cost", "shares", "date"])
+    st.markdown("### 💼 持股健檢與換股建議（存於 `portfolio.json`）")
+    base = pd.DataFrame(portfolio_rows)
     for col in ("code", "cost", "shares", "date"):
-        if col not in base:
-            base[col] = None
+        if col not in base: base[col] = None
     base["code"] = base["code"].astype(str).str.strip()
-    base.insert(1, "name", base["code"].map(lambda c: NAMES.get(c, "（查無名稱，請確認代碼）")))
+    base.insert(1, "name", base["code"].map(lambda c: NAMES.get(c, "—")))
+
     edited = st.data_editor(base[["code", "name", "cost", "shares", "date"]], num_rows="dynamic", use_container_width=True,
-                            key="port_editor",
-                            column_config={"code": "代碼", "name": st.column_config.TextColumn("名稱（自動帶入）", disabled=True),
-                                           "cost": st.column_config.NumberColumn("成本", format="%.2f"),
-                                           "shares": st.column_config.NumberColumn("股數", step=1000),
-                                           "date": "買進日(YYYY-MM-DD)"})
-    if st.button("💾 儲存持股"):
-        rows_new = (edited[["code", "cost", "shares", "date"]].dropna(subset=["code"])
-                    .replace({np.nan: None}).to_dict("records"))
+                            column_config={"code": "代碼", "name": st.column_config.TextColumn("名稱", disabled=True),
+                                           "cost": st.column_config.NumberColumn("買進成本", format="%.2f"),
+                                           "shares": st.column_config.NumberColumn("持股股數", step=1000),
+                                           "date": "買進日期 (YYYY-MM-DD)"})
+    if st.button("💾 儲存最新持股"):
+        rows_new = edited[["code", "cost", "shares", "date"]].dropna(subset=["code"]).replace({np.nan: None}).to_dict("records")
         st.session_state["portfolio"] = rows_new
         save_portfolio(rows_new)
-        st.success("已儲存。")
+        st.success("持股資料已成功寫入 portfolio.json！")
+        st.rerun()
 
-    recs = edited.replace({np.nan: None}).to_dict("records")
-    codes_h = [str(r.get("code") or "").strip() for r in recs if str(r.get("code") or "").strip()]
-    need = [c for c in codes_h if c not in ctx["ind_map"]]
-    ind_h = {**ctx["ind_map"], **(get_ind_map(need, ALL_MARKET, get_px) if need else {})}
-    hold_rows, health = [], {}
-    for r in recs:
+    # 健檢分析
+    hold_health_list = []
+    for r in portfolio_rows:
         c = str(r.get("code") or "").strip()
-        if not c:
-            continue
-        d = ind_h.get(c)
-        if d is None or len(d) < 65:
-            hold_rows.append({"標的": label(c), "警訊": "無法取得足夠的價格資料"})
-            continue
+        if not c or c not in ind_map_hold: continue
+        d = ind_map_hold[c]
         h = holding_health(d, params)
         cost = float(r.get("cost") or 0)
-        shares = float(r.get("shares") or 0)
-        pnl = (h["close"] / cost - 1) * 100 if cost else np.nan
-        try:
-            days_held = (pd.Timestamp(d.index[-1]) - pd.Timestamp(str(r.get("date"))[:10])).days
-        except Exception:
-            days_held = None
-        health[c] = dict(h, pnl=pnl, days=days_held)
-        cd = chip_dict(c) or {}
-        hold_rows.append({"標的": label(c), "現價": round(h["close"], 2), "成本": cost, "未實現%": round(pnl, 2),
-                          "損益(元)": round((h["close"] - cost) * shares), "弱勢分": h["weak"],
-                          "警訊": "、".join(h["flags"]) or "—", "防守價(現價重算)": h["stop"], "持有天數": days_held,
-                          "大戶>400張%": round(cd["big400"], 1) if pd.notna(cd.get("big400", np.nan)) else None,
-                          "大戶週增減pp": round(cd["d_big400"], 2) if cd.get("d_big400") is not None else None,
-                          "外資5日(張)": round(cd["foreign"] / 1000) if "foreign" in cd else None,
-                          "投信5日(張)": round(cd["trust"] / 1000) if "trust" in cd else None})
-    if hold_rows:
-        st.dataframe(pd.DataFrame(hold_rows), use_container_width=True, hide_index=True)
-        st.caption("現價含盤中最新成交（若盤中）；弱勢分：跌破月線+2、月線下彎+1、跌破季線+2、RSI<45 +1、觸及防守價+3。")
+        pnl = (h["close"] / cost - 1) * 100 if cost else 0
+        hold_health_list.append({
+            "標的": label(c), "現價": round(h["close"], 2), "成本": cost, "未實現%": round(pnl, 2),
+            "弱勢評分": h["weak"], "警訊描述": "、".join(h["flags"]) or "格局健康", "量化防守價": h["stop"]
+        })
+    if hold_health_list:
+        st.dataframe(pd.DataFrame(hold_health_list), use_container_width=True, hide_index=True)
 
-    st.markdown("#### 換股建議")
-    cands_p = latest_candidates(eng, params, top=3, exclude=meta["punish"], chip_fn=chip_fn)
-    if not health:
-        st.info("尚無持股。")
-    elif not cands_p:
-        st.info("今日無合格新標的，不需要換股。")
-    else:
-        top = cands_p[0]
-        if top["code"] in health:
-            st.success(f"今日首選 {label(top['code'])} 已在持股中。")
-        else:
-            wc, wh = max(health.items(), key=lambda kv: (kv[1]["weak"], -(kv[1]["pnl"] if pd.notna(kv[1]["pnl"]) else 0)))
-            rt = eng.costs.round_trip * 100
-            if wh["weak"] >= 2 and regime_ok:
-                st.error(f"建議評估：賣出 **{label(wc)}**（弱勢分 {wh['weak']}：{'、'.join(wh['flags'])}），"
-                         f"隔日開盤換入 **{label(top['code'])}**（最終分 {top['final']:.1f}）。換股來回成本約 {rt:.2f}%，"
-                         "請確認新標的預期優勢大於成本。")
-                if st.button(f"🔄 記錄換股：賣 {label(wc)} → 買 {label(top['code'])}"):
-                    rows_p = st.session_state["portfolio"]
-                    for r in rows_p:
-                        if str(r.get("code") or "").strip() == wc:
-                            r["code"], r["cost"], r["date"] = top["code"], round(top["close"], 2), data_date
-                    save_portfolio(rows_p)
-                    st.success("已更新 portfolio.json（實際成交價請自行修正）。")
-                    st.rerun()
-            else:
-                st.success(f"持股沒有明顯轉弱訊號（最弱：{label(wc)}，弱勢分 {wh['weak']}），"
-                           f"不建議為了換股支付約 {rt:.2f}% 的來回成本。" + ("" if regime_ok else " 大盤偏弱，也不新進場。"))
+    # 換股判斷
+    if hold_health_list and cands:
+        weakest = max(hold_health_list, key=lambda x: x["弱勢評分"])
+        if weakest["弱勢評分"] >= 2 and regime_ok:
+            st.error(f"🚨 換股警報：持股 【{weakest['標的']}】 弱勢評分達 {weakest['弱勢評分']}（{weakest['警訊描述']}），"
+                     f"建議換入今日主力首選 【{label(cands[0]['code'])}】！")
 
-# ============================================================================
-# Tab 3：族群
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Tab 3：族群多空儀表板
+# ----------------------------------------------------------------------------
 with tab_sec:
-    st.markdown("### 🌐 族群多空儀表板（真實價量 + 官方籌碼/營收；沒資料就不顯示）")
-    c_a, c_b = st.columns(2)
-    sec = c_a.selectbox("產業族群", list(SECTORS))
-    all_tags = sorted({t for v in SECTORS.values() for _, _, ts in v for t in ts})
-    tag_pick = c_b.selectbox("概念標籤（選了會覆蓋族群）", ["—"] + all_tags)
-    items = ([(c, n, t) for v in SECTORS.values() for c, n, t in v if tag_pick in t] if tag_pick != "—" else SECTORS[sec])
-    seen = set()
-    items = [i for i in items if not (i[0] in seen or seen.add(i[0]))]
-    sec_ind = get_ind_map([c for c, _, _ in items], ALL_MARKET, get_px)
-    for i in range(0, len(items), 2):
-        cols = st.columns(2)
-        for k in range(2):
-            if i + k >= len(items):
-                continue
-            c, n0, tg = items[i + k]
-            with cols[k]:
-                d = sec_ind.get(c)
-                if d is None or len(d) < 65:
-                    st.warning(f"{label(c)}：無足夠價格資料")
-                    continue
-                last, prev = float(d["Close"].iloc[-1]), float(d["Close"].iloc[-2])
-                diff = last - prev
-                col = "#ef4444" if diff >= 0 else "#22c55e"
-                diag = bull_bear_checks(d, chip_dict(c), meta["rev"].get(c, np.nan))
-                nb, nr = len(diag["bull"]), max(1, len(diag["bear"]))
-                pct_b = int(nb / (nb + nr) * 100)
-                mk = "上櫃" if ALL_MARKET.get(c) == "TWO" else "上市"
-                st.markdown(f"""
-                <div class="stock-card">
-                  <div style="display:flex;justify-content:space-between;align-items:baseline;">
-                    <div><span style="font-size:22px;font-weight:800;color:#f59e0b !important;">{c} {html.escape(NAMES.get(c, n0))}</span>
-                      <span style="font-size:12px;background:#334155;padding:2px 6px;border-radius:4px;margin-left:6px;">{mk}</span>
-                      <div style="margin-top:6px;">{''.join(f'<span class="tag-badge">{html.escape(t)}</span>' for t in tg)}</div></div>
-                    <div style="text-align:right;"><div style="font-size:26px;font-weight:800;">{last:.2f}</div>
-                      <div style="color:{col} !important;font-weight:600;">{'▲' if diff>=0 else '▼'} {diff:+.2f} ({diff/prev*100:+.2f}%)</div></div></div>
-                  <div style="margin-top:8px;">{link_html(c)}</div></div>""", unsafe_allow_html=True)
-                st.plotly_chart(candle_fig(d, 35, height=210), use_container_width=True)
-                st.markdown(f"""
-                <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700;">
-                  <span style="color:#ef4444 !important;">● 多方 {nb} 項</span><span style="color:#22c55e !important;">● 空方 {len(diag['bear'])} 項</span></div>
-                <div class="bb-bg"><div class="bb-fill" style="width:{pct_b}%;"></div></div>
-                <div style="font-size:12px;"><b style="color:#f87171 !important;">多方：</b>{''.join(f'<span class="chk-bull">{html.escape(x)}</span>' for x in diag['bull'][:8])}</div>
-                <div style="font-size:12px;"><b style="color:#4ade80 !important;">空方：</b>{''.join(f'<span class="chk-bear">{html.escape(x)}</span>' for x in diag['bear'][:6]) or '—'}</div>
-                """, unsafe_allow_html=True)
+    st.markdown("### 🌐 核心概念族群動能儀表板")
+    sec_pick = st.selectbox("選擇產業族群", list(SECTORS))
+    items = SECTORS[sec_pick]
+    sec_inds = get_ind_map([c for c, _, _ in items], ALL_MARKET, get_px)
 
-# ============================================================================
-# Tab 4：驗證
-# ============================================================================
+    cols = st.columns(2)
+    for idx, (c, n0, tg) in enumerate(items):
+        with cols[idx % 2]:
+            d = sec_inds.get(c)
+            if d is None or len(d) < 30: continue
+            last, prev = float(d["Close"].iloc[-1]), float(d["Close"].iloc[-2])
+            diff = last - prev
+            checks = bull_bear_checks(d, chip_fn(c, last, float(d['Turnover_MA5'].iloc[-1]))[1] if chip_fn else None)
+            pct_bull = int(len(checks["bull"]) / max(1, len(checks["bull"]) + len(checks["bear"])) * 100)
+
+            st.markdown(f"""
+            <div class="stock-card">
+              <div style="display:flex;justify-content:space-between;">
+                <div><b>{c} {NAMES.get(c, n0)}</b></div>
+                <div style="color:{'#ef4444' if diff>=0 else '#22c55e'}; font-weight:700;">
+                  {last:.2f} ({diff/prev*100:+.2f}%)
+                </div>
+              </div>
+              <div class="bb-bg"><div class="bb-fill" style="width:{pct_bull}%;"></div></div>
+              <div style="font-size:12px;">多方：{''.join(f'<span class="chk-bull">{x}</span>' for x in checks['bull'][:4])}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.plotly_chart(candle_fig(d, 30, height=200), use_container_width=True)
+
+# ----------------------------------------------------------------------------
+# Tab 4：Walk-Forward 驗證與蒙地卡羅回測
+# ----------------------------------------------------------------------------
 with tab_val:
-    st.markdown("### 🧪 Walk-Forward 驗證與風險")
-    st.caption("做法：滾動視窗——用訓練期挑參數（分數權重預設、進場門檻、ATR停損倍數、停利R、持股天數），"
-               "再拿『沒看過的』測試期驗證，最後把所有測試期串起來看樣本外績效。回測含手續費、證交稅、滑價；"
-               "隔日開盤進場；跳空以開盤價成交；同日停損優先於停利。")
-    st.caption(f"候選參數組合共 {len(list(__import__('itertools').product(*DEFAULT_GRID.values())))} 組；"
-               f"資料共 {len(eng.idx)} 個交易日（{eng.idx[0]:%Y-%m-%d} ~ {eng.idx[-1]:%Y-%m-%d}）。")
-    if st.button("▶ 執行 Walk-Forward 驗證"):
-        bar = st.progress(0.0, text="回測中…")
-        res = walk_forward(eng, train_days=train_days, test_days=test_days, progress=lambda x: bar.progress(x))
-        bar.empty()
-        if res is None:
-            st.error("資料天數不足以切出訓練+測試視窗，請縮短視窗長度或擴大股票池。")
-        else:
-            st.session_state["wf"] = res
-            st.session_state["final_params"] = res["final_params"]
-            _bh = bench_return(eng.bench_close, res["oos_equity"].index)[1] if len(res["oos_equity"]) else np.nan
-            save_best_params(res["final_params"], verdict(res, _bh)[0])
-            st.rerun()
+    st.markdown("### 🧪 Walk-Forward 樣本外滾動驗證與蒙地卡羅風控")
+    st.caption("模擬滾動視窗：以過去交易日挑選最佳主力參數，在隨後完全未見過的測試視窗實測；所有數值扣除交易滑價與手續費。")
 
-    wf = st.session_state.get("wf")
+    if st.button("▶ 啟動 Walk-Forward 樣本外回測驗證"):
+        bar = st.progress(0.0, text="滾動驗證計算中...")
+        res = walk_forward(eng, progress=lambda x: bar.progress(x))
+        bar.empty()
+        if res:
+            st.session_state["wf_res"] = res
+            st.success("驗證完成！")
+
+    wf = st.session_state.get("wf_res")
     if wf:
         o = wf["oos_stats"]
-        curve, bh = bench_return(eng.bench_close, wf["oos_equity"].index) if len(wf["oos_equity"]) else (pd.Series(dtype=float), np.nan)
-        lv, hd, bl = verdict(wf, bh)
-        verdict_banner(lv, hd, bl)
+        bench_curve, bench_ret = bench_return(eng.bench_close, wf["oos_equity"].index)
+        m = st.columns(4)
+        m[0].metric("樣本外勝率", f"{o['win_rate']:.1f}%", f"總交易 {o['n']} 筆")
+        m[1].metric("賺賠比 (Payoff)", f"{o['payoff']:.2f}")
+        m[2].metric("策略累計總報酬", f"{o['total_ret']:+.1f}%")
+        m[3].metric("同期加權指數報酬", f"{bench_ret:+.1f}%", f"Alpha: {o['total_ret'] - bench_ret:+.1f}%")
 
-        def f(x, fmt="{:.2f}", na="—"):
-            return na if x is None or (isinstance(x, float) and np.isnan(x)) else fmt.format(x)
+        fig_eq = go.Figure()
+        fig_eq.add_trace(go.Scatter(x=wf["oos_equity"].index, y=wf["oos_equity"].values, name="主力策略樣本外淨值", line=dict(color="#f59e0b", width=2)))
+        fig_eq.add_trace(go.Scatter(x=bench_curve.index, y=bench_curve.values, name="大盤買進持有基準", line=dict(color="#38bdf8", width=1.5, dash="dot")))
+        fig_eq.update_layout(height=340, title="策略累積淨值 vs 大盤基準 (起點 = 1.0)", paper_bgcolor="#080c14", plot_bgcolor="#080c14", font=dict(color="#fff"))
+        st.plotly_chart(fig_eq, use_container_width=True)
 
-        m = st.columns(6)
-        m[0].metric("樣本外交易筆數", f"{o['n']}", "n<30 不可靠" if o["n"] < 30 else "")
-        m[1].metric("勝率", f(o["win_rate"], "{:.1f}%"), f"95%CI {f(o['wr_lo'], '{:.0f}')}~{f(o['wr_hi'], '{:.0f}')}%")
-        m[2].metric("平均獲利 / 平均虧損", f"{f(o['avg_win'], '{:+.2f}')}% / {f(o['avg_loss'], '{:+.2f}')}%")
-        m[3].metric("每筆期望值", f(o["expectancy"], "{:+.2f}%"), f"t={f(o['tstat'])}")
-        m[4].metric("盈虧因子 / 賺賠比", f"{f(o['profit_factor'])} / {f(o['payoff'])}")
-        m[5].metric("最大連虧", f"{o['max_consec_loss']} 次")
-        m2 = st.columns(5)
-        m2[0].metric("樣本外總報酬", f(o["total_ret"], "{:+.1f}%"), f"大盤 {f(bh, '{:+.1f}')}%")
-        m2[1].metric("年化報酬", f(o["cagr"], "{:+.1f}%") if not np.isnan(o["cagr"]) else "期間過短")
-        m2[2].metric("最大回撤", f(o["mdd"], "-{:.1f}%"))
-        m2[3].metric("Sharpe", f(o["sharpe"]))
-        m2[4].metric("平均持有", f(o["avg_hold"], "{:.1f} 日"))
+        # 蒙地卡羅破產率分析
+        st.markdown("##### 🎲 蒙地卡羅模擬（區塊自助抽樣 1500 次）")
+        mc = mc_ruin(wf["oos_trades"]["net_pct"].tolist() if len(wf["oos_trades"]) else [])
+        if mc:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("50筆交易後平均淨值", f"{mc['end_mean']:.2f}")
+            c2.metric("95% 信賴最大回撤", f"-{mc['mdd95']:.1f}%")
+            c3.metric("本金腰斬風險機率", f"{mc['p_ruin']:.2f}%")
 
-        if len(wf["oos_equity"]):
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=wf["oos_equity"].index, y=wf["oos_equity"].values, name="策略（樣本外串接）", line=dict(color="#f59e0b", width=2.2)))
-            if len(curve):
-                fig.add_trace(go.Scatter(x=curve.index, y=curve.values, name="加權指數買進持有", line=dict(color="#38bdf8", width=1.6)))
-            fig.update_layout(height=340, title="樣本外淨值（起點=1）", paper_bgcolor="#080c14", plot_bgcolor="#080c14", font=dict(color="#fff"))
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("##### 各折明細（訓練期 vs 測試期）")
-        fd = wf["folds"].copy()
-        fd = fd.rename(columns={"fold": "折", "train": "訓練期", "test": "測試期", "params": "訓練期選出的參數", "train_n": "訓練筆數",
-                                "train_exp": "訓練期望值%", "test_n": "測試筆數", "test_exp": "測試期望值%",
-                                "test_ret": "測試報酬%", "test_mdd": "測試MDD%", "rank_pct": "測試期排名百分位"})
-        st.dataframe(fd.round(2), use_container_width=True, hide_index=True)
-        st.caption(f"訓練期平均期望值 {f(wf['is_expectancy'], '{:+.2f}%')} → 樣本外 {f(o['expectancy'], '{:+.2f}%')}；"
-                   f"所選參數在測試期的排名中位數 {f(wf['rank_pct_median'], '{:.0f}')} 百分位（≈50 代表挑參數沒有增值）。"
-                   f"各折選到的權重預設：{wf['preset_selection']}（越分散代表參數越不穩定）。")
-
-        st.markdown("##### 🎲 蒙地卡羅（區塊自助法）— 依樣本外交易損益")
-        trs = wf["oos_trades"]["net_pct"].tolist() if len(wf["oos_trades"]) else []
-        mc = mc_ruin(trs)
-        if not mc:
-            st.info("樣本外交易少於 5 筆，無法做蒙地卡羅。")
-        else:
-            a1, a2, a3, a4 = st.columns(4)
-            a1.metric("60 筆後平均淨值", f"{mc['end_mean']:.2f}")
-            a2.metric("5% 最差淨值", f"{mc['end_p5']:.2f}")
-            a3.metric("95% 信賴最大回撤", f"-{mc['mdd95']:.1f}%")
-            a4.metric("淨值腰斬機率", f"{mc['p_ruin']:.2f}%")
-            fig2 = go.Figure()
-            for row in mc["curves"][:60]:
-                fig2.add_trace(go.Scatter(y=row, mode="lines", line=dict(width=.6, color="rgba(56,189,248,.18)"), showlegend=False))
-            fig2.add_trace(go.Scatter(y=mc["curves"].mean(axis=0), line=dict(width=2.4, color="#f59e0b"), name="平均"))
-            fig2.update_layout(height=320, paper_bgcolor="#080c14", plot_bgcolor="#080c14", font=dict(color="#fff"),
-                               xaxis_title="交易筆數", yaxis_title="淨值（起點1，每筆約25%資金）")
-            st.plotly_chart(fig2, use_container_width=True)
-            if len(trs) < 30:
-                st.caption("⚠ 樣本少於 30 筆，蒙地卡羅只是在重複抽你手上很少的資料，低估真實風險的可能性很高。")
-
-        st.markdown("##### 🔬 訊號預測力檢驗（整個股票池、不限於實際下單的標的）")
-        hz = st.select_slider("預測期間（交易日）", [5, 10, 15, 20], value=10)
-        sq = signal_quality(eng, params.preset, hz)
-        q1, q2, q3 = st.columns(3)
-        q1.metric("Rank IC 平均", f(sq["ic_mean"], "{:+.3f}"), "分數 vs 未來報酬的排序相關")
-        q2.metric("IC t 值", f(sq["ic_t"]), "|t|>2 才算顯著")
-        q3.metric("IC IR", f(sq["ic_ir"]))
-        if len(sq["quintile"]):
-            st.dataframe(sq["quintile"].round(2), use_container_width=True)
-            qq = sq["quintile"]
-            top, bot = qq["平均報酬"].iloc[-1], qq["平均報酬"].iloc[0]
-            mono = qq["平均報酬"].is_monotonic_increasing
-            st.caption(("高分組報酬高於低分組（{:+.2f}% vs {:+.2f}%），".format(top, bot) if top > bot else
-                        "高分組報酬並未高於低分組（{:+.2f}% vs {:+.2f}%），".format(top, bot))
-                       + ("且五分位單調遞增。" if mono else "五分位並非單調，分數的排序能力有限。")
-                       + " 若 IC 接近 0，代表這套分數對『預測』沒有實質幫助，別被漂亮的回測曲線騙了。")
-        if len(wf["oos_trades"]):
-            with st.expander("樣本外逐筆交易明細"):
-                t = wf["oos_trades"].copy()
-                t["code"] = t["code"].map(label)
-                t["entry_date"] = pd.to_datetime(t["entry_date"]).dt.strftime("%Y-%m-%d")
-                t["exit_date"] = pd.to_datetime(t["exit_date"]).dt.strftime("%Y-%m-%d")
-                st.dataframe(t.rename(columns={"code": "標的", "entry_date": "進場日(開盤)", "exit_date": "出場日", "fill": "成交價",
-                                               "exit": "出場價", "reason": "出場原因", "days": "持有日", "net_pct": "淨損益%",
-                                               "r_mult": "R倍數", "fold": "折"}).round(2), use_container_width=True, hide_index=True)
-    else:
-        st.info("按上方按鈕開始驗證。第一次執行約需數十秒到數分鐘（視股票池大小）。")
-
-# ============================================================================
-# Tab 5：篩選器
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Tab 5：15 項全景篩選器
+# ----------------------------------------------------------------------------
 with tab_scr:
-    st.markdown("### 🛠️ 15 項全景篩選器（對整個流動性股票池，不受推薦過濾影響）")
+    st.markdown("### 🛠️ 15 項全景條件式雷達篩選")
     snap = snapshot(eng, params.preset)
     snap = snap[snap["liquid"]]
     chosen = []
-    with st.expander("勾選條件（全部 AND）", expanded=True):
+
+    with st.expander("條件過濾清單（交集篩選）", expanded=True):
         cols = st.columns(3)
         for i, name in enumerate(SCREEN_FLAGS):
             if cols[i % 3].checkbox(name, key=f"scr_{i}"):
                 chosen.append(name)
         s1, s2 = st.columns(2)
-        mb5 = s1.slider("5MA 乖離上限 (%)", 1.0, 15.0, 15.0, 0.5, key="scr_b5")
-        mb20 = s2.slider("20MA 乖離上限 (%)", 3.0, 40.0, 40.0, 1.0, key="scr_b20")
+        mb5 = s1.slider("5MA 乖離上限 (%)", 1.0, 10.0, 4.0, 0.5)
+        mb20 = s2.slider("20MA 乖離上限 (%)", 3.0, 25.0, 12.0, 1.0)
+
     res = snap.copy()
     for name in chosen:
         res = res[res[name]]
     res = res[(res["bias5"] <= mb5) & (res["bias20"] <= mb20)].sort_values("score", ascending=False)
-    if res.empty:
-        st.warning("沒有符合的標的，請放寬條件。")
+
+    if not res.empty:
+        st.dataframe(pd.DataFrame({
+            "標的": [label(c) for c in res.index], "收盤": res["close"].round(2),
+            "漲跌%": res["pct"].round(2), "主力評分": res["score"].round(1),
+            "5日均額(億)": res["turnover_yi"].round(2), "5MA乖離%": res["bias5"].round(2)
+        }), use_container_width=True, hide_index=True)
     else:
-        show = pd.DataFrame({"標的": [label(c) for c in res.index], "分數": res["score"].round(1), "收盤": res["close"].round(2),
-                             "漲跌%": res["pct"].round(2), "成交(張)": res["volume_lots"].round(0).astype(int),
-                             "5日均額(億)": res["turnover_yi"].round(2), "5MA乖離%": res["bias5"].round(2),
-                             "20MA乖離%": res["bias20"].round(2), "K": res["K"].round(1), "RSI": res["RSI"].round(1),
-                             "通過推薦過濾": np.where(res["eligible"], "✔", "")})
-        st.dataframe(show, use_container_width=True, hide_index=True)
-        st.caption(f"符合 {len(res)} 檔 / 流動性股票池 {len(snap)} 檔。")
+        st.warning("查無符合全部交集條件之標的，請適度放寬勾選限制。")
 
-# ============================================================================
-# Tab 6：推播與自選股監控
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Tab 6：推播通知與自選股監控
+# ----------------------------------------------------------------------------
 with tab_alert:
-    st.markdown("### 🔔 推播與自選股監控（Telegram / LINE）")
-    st.caption("頁面開著時每 20 分鐘自動掃描；要『瀏覽器關閉也推播』請在主機另外執行 `python tw_quant_app.py --daemon`。"
-               "同一則訊號不會重複推送（記錄在 alert_state.json）。")
-    with st.expander("推播管道設定", expanded=not configured):
-        st.markdown("""
-**Telegram**：在 @BotFather 建立機器人取得 Token；對機器人傳一則訊息後，開啟
-`https://api.telegram.org/bot<TOKEN>/getUpdates` 找到 `chat.id`。
-**LINE**：LINE Notify 已於 2025/3/31 終止，請改用 LINE Official Account 的 Messaging API：取得 Channel access token；
-填入自己的 User ID 會單獨推送給你，留空則會廣播給所有好友（免費方案每月訊息量有限）。
-建議把金鑰放在環境變數或 `.streamlit/secrets.toml`（鍵名：TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID、LINE_CHANNEL_TOKEN、LINE_USER_ID），不要寫死在程式碼。
-        """)
-        ov = st.session_state.setdefault("cfg_override", {})
-        ov["tg_token"] = st.text_input("Telegram Bot Token（僅存於本次連線）", value=ov.get("tg_token", ""), type="password")
-        ov["tg_chat"] = st.text_input("Telegram Chat ID", value=ov.get("tg_chat", ""))
-        ov["line_token"] = st.text_input("LINE Channel access token", value=ov.get("line_token", ""), type="password")
-        ov["line_user"] = st.text_input("LINE User ID（可留空=廣播）", value=ov.get("line_user", ""))
-    cfg_now = cur_cfg()
-    configured = bool((cfg_now["tg_token"] and cfg_now["tg_chat"]) or cfg_now["line_token"])
-    a1, a2 = st.columns(2)
-    a1.checkbox("開啟自動推播（每 20 分鐘掃描一次）", value=configured, key="auto_push")
-    a2.multiselect("推播哪些類型", list(ALERT_CATS), default=list(ALERT_CATS), format_func=lambda k: ALERT_CATS[k], key="alert_cats")
-    if st.button("📨 傳送測試訊息"):
-        res = notify_all("✅ 台股量化系統推播測試成功。", cfg_now) if configured else []
-        if not res:
-            st.error("尚未設定任何推播管道。")
-        for ok, m in res:
-            (st.success if ok else st.error)(m)
+    st.markdown("### 🔔 Telegram / LINE 推播發報與自選股監控")
+    cfg_curr = notify_cfg()
+    configured = bool((cfg_curr["tg_token"] and cfg_curr["tg_chat"]) or cfg_curr["line_token"])
 
-    st.markdown("#### 自選股監控（任何上市櫃代碼；突破、跌破、爆量、KD/MACD 轉折都會通知）")
-    wl_text = st.text_area("代碼（以逗號、空白或換行分隔）", value=", ".join(st.session_state["watchlist"]), height=70)
+    with st.expander("通訊推播金鑰設定", expanded=not configured):
+        st.info("支援 Telegram Bot 與 LINE Official Messaging API。建議存於環境變數或 Streamlit Secrets。")
+        tg_tok = st.text_input("Telegram Token", value=cfg_curr["tg_token"], type="password")
+        tg_cht = st.text_input("Telegram Chat ID", value=cfg_curr["tg_chat"])
+
+    if st.button("📨 發送連線測試推播"):
+        res = notify_all("✅ 台股量化決策系統推播連線成功！", cfg_curr)
+        for ok, msg in res:
+            (st.success if ok else st.error)(msg)
+
+    st.markdown("#### 自選股監控清單")
+    wl_input = st.text_area("自選股代碼（逗號或空格分隔）", value=", ".join(watch_codes))
     if st.button("💾 儲存自選股"):
-        codes = [c for c in re.split(r"[\s,，、]+", wl_text) if re.fullmatch(r"\d{4}", c)]
-        st.session_state["watchlist"] = codes
-        save_watchlist(codes)
-        st.success(f"已儲存 {len(codes)} 檔：" + "、".join(label(c) for c in codes))
+        parsed = [c for c in re.split(r"[\s,，]+", wl_input) if re.fullmatch(r"\d{4}", c)]
+        st.session_state["watchlist"] = parsed
+        save_watchlist(parsed)
+        st.success("自選股清單已更新！")
         st.rerun()
-    if st.session_state["watchlist"]:
-        st.caption("目前監控：" + "、".join(label(c) for c in st.session_state["watchlist"]))
 
-    st.markdown("#### 目前偵測到的訊號（預覽；是否已推送看下方紀錄）")
+    st.markdown("#### 📡 目前偵測即時訊號總覽")
     if alerts:
-        st.dataframe(pd.DataFrame([{"類型": ALERT_CATS[a.cat], "內容": a.text.replace("\n", "  ")} for a in alerts]),
+        st.dataframe(pd.DataFrame([{"類型": ALERT_CATS[a.cat], "訊號內容": a.text.replace("\n", " ｜ ")} for a in alerts]),
                      use_container_width=True, hide_index=True)
     else:
-        st.info("目前沒有新的訊號。")
-    if st.session_state.get("alert_log"):
-        st.markdown("#### 推播紀錄")
-        for line in st.session_state["alert_log"][:15]:
-            st.caption(line)
+        st.info("目前無新觸發事件訊號。")

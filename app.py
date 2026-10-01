@@ -2152,8 +2152,34 @@ try:
         eng, bench_df, eng_notes = build_engine(bucket, n_universe, tuple(excl), min_price, min_turn_yi, min_amp,
                                                 bias5_max, bias20_max, fee_disc, slip_pct, risk_pct, use_intraday)
         meta = load_meta(bucket.rsplit("-", 1)[0])
+except RuntimeError as e:
+    st.error(f"⚠️ 資料載入失敗：{e}")
+    st.markdown("""
+**可能原因與解決方式：**
+
+1. **在 GitHub Codespaces / 雲端環境執行** → Yahoo Finance 被防火牆封鎖
+   - 解決：改在**本機電腦**執行 `streamlit run tw_quant_app_v3.py`
+
+2. **網路問題** → 等 5 分鐘後點「🔄 重新抓取最新資料」
+
+3. **yfinance 版本問題** → 執行 `pip install --upgrade yfinance`
+
+4. **非交易日（週末）首次執行** → 程式需要 ≥120 筆歷史資料，請確認網路暢通
+""")
+    st.info("💡 如果你在 Codespaces 看到這個錯誤，請複製 `tw_quant_app_v3.py` 到本機電腦執行。")
+    if st.button("🔄 重試"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+    st.stop()
 except Exception as e:
     st.error(f"資料載入失敗：{e}")
+    import traceback
+    st.code(traceback.format_exc(), language="python")
+    if st.button("🔄 重試"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
     st.stop()
 st.session_state["loaded_bucket"] = bucket
 
